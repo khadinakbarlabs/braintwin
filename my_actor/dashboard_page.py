@@ -174,7 +174,7 @@ var QS=new URLSearchParams(location.search);
 var TOKEN=HOSTED?'':(QS.get('token')||''),KEY='';
 function store(k,v){try{if(v==null)sessionStorage.removeItem(k);else sessionStorage.setItem(k,v);}catch(e){}}
 function stored(k){try{return sessionStorage.getItem(k)||'';}catch(e){return'';}}
-if(TOKEN)store('sb.t',TOKEN);else TOKEN=stored('sb.t');KEY=stored('sb.k');
+if(TOKEN)store('sb.t',TOKEN);else TOKEN=stored('sb.t');
 if(location.search){try{history.replaceState(null,'',location.pathname);}catch(e){}}
 var main=document.getElementById('main'),toastEl=document.getElementById('toast');
 var state={tab:'start',q:'',status:'approved',sort:'newest',tag:'',from:'',tool:'ChatGPT',overview:null,sel:new Set()};
@@ -195,17 +195,6 @@ function h(tag,props){
   return el;
 }
 function toast(msg,err){toastEl.textContent=msg;toastEl.className='toast'+(err?' err':'');toastEl.hidden=false;clearTimeout(toast.t);toast.t=setTimeout(function(){toastEl.hidden=true},3200);}
-function askKey(retry){
-  var body=document.getElementById('dlg-body');body.textContent='';
-  var inp=h('input',{type:'password',autocomplete:'off',placeholder:'Page password'});
-  body.appendChild(h('h3',{text:'Enter your page password'}));
-  body.appendChild(h('p',{class:'note',text:'You locked this page with a password (Settings, Lock this page). It is asked once before any change, so nothing else can add or change your memory. It is kept in this tab only.'}));
-  body.appendChild(inp);
-  body.appendChild(h('button',{class:'btn primary',type:'button',text:'Unlock',onclick:function(){
-    KEY=inp.value;try{sessionStorage.setItem('sb.k',KEY);}catch(e){}
-    document.getElementById('dlg').close();if(retry)retry();}}));
-  var dlg=document.getElementById('dlg');if(dlg.showModal)dlg.showModal();
-}
 function api(path,opts){
   opts=opts||{};
   var init={method:opts.body?'POST':'GET',headers:{}};
@@ -220,8 +209,6 @@ function api(path,opts){
     // so the browser reports a network error instead. Try one refresh, then retry.
     if(HOSTED&&!opts.retried&&stored('sb.r')){return renew().then(function(ok){if(ok){opts.retried=true;return api(path,opts);}signedOut('Please sign in again.');return{ok:false,message:'Signed out'};});}
     return{ok:false,message:'Could not reach your memory. Check your connection and try again.'};}).then(function(r){
-    if(r&&r.error==='BAD_KEY'){KEY='';try{sessionStorage.removeItem('sb.k');}catch(e){}}
-    if(r&&(r.error==='KEY_REQUIRED'||r.error==='BAD_KEY')){askKey(function(){api(path,opts).then(function(x){if(x.ok===false)toast(x.message||'Failed',true);else{toast('Done');refreshOverview().then(render);}});});}
     return r;
   });
 }
@@ -300,7 +287,7 @@ function exportAll(btn){
   fetch(BASE+'/api/export'+(HOSTED?'':'?status='+encodeURIComponent(state.status)),init).then(function(r){if(r.status===403)throw new Error('key');if(!r.ok)throw new Error('x');return r.blob();}).then(function(b){
     var a=h('a',{href:URL.createObjectURL(b),download:'second-brain-'+state.status+'.json'});document.body.appendChild(a);a.click();
     setTimeout(function(){URL.revokeObjectURL(a.href);document.body.removeChild(a);},1000);btn.disabled=false;toast('Export downloaded');
-  }).catch(function(e){btn.disabled=false;toast(e&&e.message==='key'?'Export needs your page password. Set one in Settings, or make any change first so the page asks for it.':'Export failed',true);});
+  }).catch(function(e){btn.disabled=false;toast('Export failed',true);});
 }
 document.getElementById('dlg-close').addEventListener('click',function(){document.getElementById('dlg').close()});
 
@@ -339,8 +326,7 @@ function viewStart(){
   box.appendChild(stats);
   var steps=[[saved>0||flag('sb.c'),'Connect an AI tool','Pick your tool and follow a few short steps.','Connect a tool','connect'],
     [saved>0,'Save a first memory','Say "remember that I prefer short answers" in your AI tool, or type it in the box above.',null,null],
-    [(o.sourcesFollowed||0)>0,'Add a source (optional)','Follow a YouTube channel, blog or newsletter. New items are then saved by themselves.','Add a source','follow'],
-    [!!o.keyRequired,'Lock this page (optional)','Set a password so only you can change things here.','Set a password','settings']];
+    [(o.sourcesFollowed||0)>0,'Add a source (optional)','Follow a YouTube channel, blog or newsletter. New items are then saved by themselves.','Add a source','follow']];
   if(!steps.every(function(x){return x[0]})&&!flag('sb.h')){
     var nd=steps.filter(function(x){return x[0]}).length;
     var c=h('section',{class:'card'},h('div',{class:'cardhead'},h('h2',{text:'Get set up'}),h('span',{class:'prog'},steps.map(function(x){return h('i',{class:x[0]?'on':''})}),nd+' of '+steps.length+' done')));var ul=h('ul',{class:'list steps'});
@@ -542,15 +528,6 @@ function viewSettings(){
     r.addEventListener('change',function(){api('settings/saving',{body:{mode:m[0]}}).then(function(x){if(x.ok===false){fail(x);return;}toast('Saved');refreshOverview().then(render);});});
     sf.appendChild(h('label',{class:'row'},r,h('span',{text:' '+m[1]})));sf.appendChild(h('p',{class:'note',text:m[2]}));});
   box.appendChild(sf);
-  box.appendChild(h('h2',{text:'Lock this page'}));
-  box.appendChild(h('p',{class:'note',text:o.keyRequired?'Locked. Changes ask for your password once.':'Not locked yet. Set a password so only you can change things here.'}));
-  var nk=h('input',{type:'password',autocomplete:'new-password',minlength:8,maxlength:200,placeholder:'Password, at least 8 characters',name:'newKey'});
-  var kf=h('form',{class:'add'},h('label',{},o.keyRequired?'Change password':'Set a password',nk),
-    h('div',{class:'row'},h('button',{class:'btn acc',type:'submit',text:'Save'}),
-      o.keySetByUser?h('button',{class:'btn warn',type:'button',text:'Remove password',onclick:function(){api('settings/key',{body:{newKey:''}}).then(function(r){if(r.ok===false){if(r.error!=='KEY_REQUIRED'&&r.error!=='BAD_KEY')toast(r.message||'Failed',true);return;}KEY='';try{sessionStorage.removeItem('sb.k');}catch(e){}toast('Key removed');refreshOverview().then(render);});}}):null));
-  kf.addEventListener('submit',function(e){e.preventDefault();var v=nk.value;
-    api('settings/key',{body:{newKey:v}}).then(function(r){if(r.ok===false){if(r.error!=='KEY_REQUIRED'&&r.error!=='BAD_KEY')toast(r.message||'Failed',true);return;}KEY=v;try{sessionStorage.setItem('sb.k',KEY);}catch(e){}toast('Key saved');refreshOverview().then(render);});});
-  box.appendChild(kf);
   box.appendChild(h('h2',{text:'Advanced: smarter search'}));
   box.appendChild(h('p',{class:'note',text:ms.on?('On, model '+(ms.model||'')+'. Titles and summaries of your memories are sent to the service you chose, and that service bills you.'):'Off. Search already forgives typos and word forms. Turn this on to also find notes that share no words with your question, for example finding "oat milk flat white" when you ask "what do I drink in the morning". You need an account with an AI service; titles and summaries of your memories are sent to it and it bills you directly. Your key is saved in your own storage.'}));
   var url=h('input',{type:'url',placeholder:'https://…/v1',name:'url'}),model=h('input',{placeholder:'model name',name:'model'}),key=h('input',{type:'password',autocomplete:'off',placeholder:'API key',name:'key'}),dims=h('input',{type:'number',min:16,max:3072,placeholder:'optional, e.g. 256',name:'dims'});

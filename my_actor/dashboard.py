@@ -39,7 +39,6 @@ from .dashboard_page import render_page
 from .follow import follow_add, follow_list, follow_memory_ids, follow_remove, follow_sync, follow_update
 from .import_memories import text_to_records
 from .ingest import check_url_async, fetch_landing_page, fetch_text
-from .settings import KeyGate, env_dashboard_key, key_problem
 
 PAGE_PATHS = ('/', '/dashboard', '/dashboard/')
 MAX_BODY_BYTES = 64 * 1024
@@ -68,9 +67,8 @@ def dashboard_enabled() -> bool:
 
 
 def dashboard_key() -> str:
-    """Environment key for CHANGES. Used only off the Apify platform; on Apify each user sets their own
-    key in the dashboard (stored hashed in their own storage)."""
-    return env_dashboard_key()
+    """Always empty: the page lock was removed, so no key is read from the environment or storage."""
+    return ''
 
 
 def _json(payload: dict[str, Any], status: int = 200) -> JSONResponse:
@@ -108,8 +106,6 @@ class DashboardMiddleware:
         self.charge = charge
         self.approval = approval
         self.enabled = dashboard_enabled()
-        self.key = dashboard_key()
-        self.gate = KeyGate(self.key)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope.get('type') != 'http' or not self.enabled:
@@ -153,30 +149,14 @@ class DashboardMiddleware:
     def _key_check(self, request: Request, in_body: str = '') -> JSONResponse | None:
         """None when the request may go ahead; otherwise the refusal to send.
 
-        The key comes in the `X-Dashboard-Key` header (the page served by this Actor) or in the
-        JSON body as `_key` (the hosted page: Apify's gateway lets no custom header through from
-        another site).
+        The page lock was removed for everyone (owner decision, 2026-11-17): no password is asked
+        and a password stored earlier is ignored. Sign-in (the Apify token) is the only gate.
         """
-        if not self.gate.required:
-            return None
-        supplied = request.headers.get('x-dashboard-key') or in_body or ''
-        if not supplied:
-            return _err(403, 'KEY_REQUIRED', 'This dashboard needs its key to make changes.')
-        if self.gate.locked():
-            return _err(429, 'KEY_LOCKED', 'Too many wrong keys. Wait half a minute and try again.')
-        if not self.gate.verify(supplied):
-            return _err(403, 'BAD_KEY', 'Wrong dashboard key.')
         return None
 
     def _needs_key_first(self) -> JSONResponse | None:
-        """On Apify, settings that change who sees your data stay locked until a dashboard key exists.
-
-        Agents you connect hold the same Apify token as you do. Without this, one of them could
-        switch these settings through the page's own endpoints.
-        """
-        if self.gate.required or not on_platform():
-            return None
-        return _err(403, 'KEY_NEEDED', 'Set a dashboard key first (Settings tab). It keeps these settings out of reach of anything else that holds your Apify token.')
+        """Always allowed: the page lock no longer exists (see `_key_check`)."""
+        return None
 
     async def _body(self, request: Request, max_bytes: int = MAX_BODY_BYTES) -> dict[str, Any] | JSONResponse:
         marked = request.headers.get('x-dashboard') == '1'
@@ -223,7 +203,6 @@ class DashboardMiddleware:
 
     async def _api(self, request: Request, name: str, method: str) -> Response:
         brain = await self.get_brain()
-        await self.gate.load(brain.kv)
         q = request.query_params
         if method == 'GET':
             if name == 'overview':
@@ -238,8 +217,8 @@ class DashboardMiddleware:
                         'recentAutoApproved': inbox.get('recentAutoApproved') or [],
                         'inboxCount': inbox.get('count', 0),
                         'sourcesFollowed': following,
-                        'keyRequired': self.gate.required,
-                        'keySetByUser': self.gate.user_set,
+                        'keyRequired': False,
+                        'keySetByUser': False,
                         'meaningSearch': brain.meaning_status(),
                         'smartCapture': brain.capture_status(),
                         'builtinAi': (await builtin_ai.provider.status(brain)) if builtin_ai.provider else {'available': False, 'on': False},
@@ -295,18 +274,8 @@ class DashboardMiddleware:
             denied = self._needs_key_first()
             if denied is not None:
                 return denied
-        if name == 'settings/key':  # free: a setting, not a memory change
-            new_key = body.get('newKey')
-            if new_key in (None, ''):
-                if not self.gate.user_set:
-                    return _err(400, 'INVALID_INPUT', 'No key is set.')
-                await self.gate.clear(brain.kv)
-                return _json({'ok': True, 'keyRequired': self.gate.required})
-            problem = key_problem(new_key)
-            if problem:
-                return _err(400, 'INVALID_INPUT', problem)
-            await self.gate.set(brain.kv, new_key)
-            return _json({'ok': True, 'keyRequired': True})
+        if name == 'settings/key':  # the page lock was removed; an old page that still asks gets a clear answer
+            return _err(410, 'GONE', 'The page password was removed. Nothing needs to be set.')
         if name == 'settings/meaning':  # free: a setting, not a memory change
             if body.get('off') is True:
                 await brain.set_meaning_search(None)
