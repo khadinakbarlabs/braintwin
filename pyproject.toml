@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "braintwin"
+version = "0.25.6"
+description = "One memory for all your AI tools, running on your own computer."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+dependencies = [
+    "fastmcp>=4.0.0,<5.0.0",
+    "mcp>=2.0.0,<3.0.0",
+    "pyjwt>=2.12.0",
+    "httpx>=0.27.0,<1.0.0",
+]
+
+[project.optional-dependencies]
+cloud = ["apify-client"]
+
+[project.scripts]
+braintwin = "my_actor.stdio:main"
+braintwin-cli = "my_actor.cli:main"
+
+[tool.setuptools]
+packages = ["my_actor"]

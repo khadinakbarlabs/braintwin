@@ -1,0 +1,629 @@
+"""MCP tool surface shared by the Standby server (main.py) and local stdio (stdio.py).
+
+Same eleven verbs everywhere; only two things differ per host and are injected:
+- `get_brain`: which storage backend (Apify Actor runtime vs local SQLite vs Apify API)
+- `charge`: pay-per-event billing (real on Apify, a no-op locally — local use is free)
+
+Billing rule: reads are free; a tool is charged only after it actually changed state.
+Dry runs, duplicate no-ops and failures are never charged.
+"""
+
+from __future__ import annotations
+
+import os
+import asyncio
+import logging
+from datetime import UTC, datetime, timedelta
+from collections.abc import Awaitable, Callable
+from typing import Any
+
+from fastmcp import FastMCP
+
+logger = logging.getLogger(__name__)
+QUICK_FETCH_SECS = 15.0  # how long a tool call waits for a page before handing it to the worker
+
+from .brain import BrainStore, scope_tag_for
+from . import builtin_ai
+from .capture import extract_candidates
+from .extractor import merge_candidates
+from .constants import (
+    APPROVAL_AGENT,
+    APPROVAL_AUTO,
+    APPROVAL_HUMAN,
+    ENV_APPROVAL,
+    ENV_INGEST_MODE,
+    INGEST_INLINE,
+    INGEST_QUEUE,
+    MAX_IMPORT_CHARS,
+    MAX_SYNC_WRITES,
+    VERSION,
+)
+from .context_pack import build_context
+from .follow import recent_followed
+from .ingest import check_url_async, fetch_landing_page
+from .sync_runner import sync_plugin_export
+
+BrainGetter = Callable[[], Awaitable[BrainStore]]
+Charger = Callable[[], Awaitable[None]]
+
+INSTRUCTIONS = (
+    'Personal memory shared by every agent the owner uses. Use it WITHOUT being asked. At the START '
+    'of every conversation or task call memory_context(query) for what is already known. Whenever '
+    'the user states a lasting preference, decision, instruction or fact about themselves or their '
+    'work, hand their words to memory_capture straight away (it skips what it already knows and '
+    'replaces what changed). When they share a link worth keeping, call memory_propose(url=...). '
+    'By default everything you save is kept automatically; only secrets are held back for the owner. '
+    'Never put secrets in memory. Reads (memory_context, memory_search, memory_explain, inbox_list, '
+    'brain_health, recent_followed_content) are free.'
+)
+
+
+def _ok(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        'type': 'text',
+        'text': str(payload.get('message') or payload.get('ok') or 'ok'),
+        'structuredContent': payload,
+    }
+
+
+def _expiry(days: int | None) -> str | None:
+    """ISO timestamp `days` from now (1..3650), or None when no expiry was asked for."""
+    if days is None:
+        return None
+    try:
+        n = int(days)
+    except (TypeError, ValueError):
+        return None
+    if n < 1:
+        return None
+    return (datetime.now(UTC) + timedelta(days=min(n, 3650))).isoformat()
+
+
+def resolve_ingest_mode(default: str) -> str:
+    value = (os.environ.get(ENV_INGEST_MODE) or '').strip().lower()
+    return value if value in (INGEST_INLINE, INGEST_QUEUE) else default
+
+
+def resolve_approval_mode(default: str = APPROVAL_HUMAN) -> str:
+    """Who approves memories: `human` (owner via CLI), `auto` (owner's policy) or `agent` (opt-in).
+
+    The server cannot tell the owner from a prompt-injected agent, so `agent` (an agent can
+    approve anything) must be chosen explicitly. `auto` lets the server approve only proposals
+    that pass the owner's policy (policy.py). An unrecognised value falls back to `default`,
+    which callers keep at the safe `human` unless they pass something stricter-by-design.
+    """
+    value = (os.environ.get(ENV_APPROVAL) or '').strip().lower()
+    if value in (APPROVAL_AGENT, APPROVAL_AUTO, APPROVAL_HUMAN):
+        return value
+    return default
+
+
+HUMAN_APPROVAL_MESSAGE = (
+    'Approval is restricted to the owner on this server. Ask them to run: '
+    'python -m my_actor.cli inbox approve <memory_id> [<memory_id> ...]'
+)
+
+
+def register_tools(
+    server: FastMCP,
+    *,
+    get_brain: BrainGetter,
+    charge: Charger,
+    ingest_mode: str,
+    approval: str = APPROVAL_HUMAN,
+) -> None:
+    human_only = approval == APPROVAL_HUMAN
+    auto_mode = approval == APPROVAL_AUTO
+
+    @server.tool()
+    async def memory_propose(
+        title: str | None = None,
+        content: str | None = None,
+        type: str = 'note',
+        tags: list[str] | None = None,
+        citations: list[dict[str, Any]] | None = None,
+        confidence: float = 0.8,
+        dedupe_key: str | None = None,
+        approve: bool = False,
+        url: str | None = None,
+        fetch_content: bool = True,
+        import_json: str | None = None,
+        source_plugin: str | None = None,
+        dry_run: bool = False,
+        import_limit: int = 200,
+        sync: bool = False,
+        agent: str | None = None,
+        scope: str | None = None,
+        expires_in_days: int | None = None,
+    ) -> dict:
+        """
+        Propose memory into the approval inbox (default). Modes:
+        1) title+content note; 2) url: add any public web page (fetched right away and split into
+        searchable passages; a slow page is queued for the background worker); 3) import_json from another agent memory plugin (AgentMemory export,
+        Mem0 results, Basic Memory notes, or generic [{title,content}]).
+        sync=true with import_json does an incremental sync: only new/changed records are
+        written, a changed record you already approved becomes a new proposal (never a silent
+        overwrite), and rejected/forgotten ones are left alone. Safe to re-run.
+        agent labels who filed it; scope (e.g. a project name) lets memory_search filter by it.
+        expires_in_days makes a note disappear from search after that many days (e.g. a promo).
+        By default notes and web pages are saved for good at once (result.autoApproval says yes/no
+        and why); the owner can switch to reviewing first. Imports always wait for the owner.
+        dry_run previews without writing.
+        Charged $0.01 only when something was actually saved (never for dry runs or duplicates).
+        """
+        brain = await get_brain()
+        brain.auto_open = brain.auto_open or auto_mode
+        scope_tag = scope_tag_for(scope)
+        extra_tags = [scope_tag] if scope_tag else []
+        agent_label = (agent or '').strip()[:80] or None
+        approval_ignored = bool(approve and human_only)
+        if approval_ignored or auto_mode:
+            approve = False  # human mode: propose only. auto mode: the policy decides, not the caller
+        note = ' (approve=true ignored: only the owner can approve here)' if approval_ignored else ''
+
+        def noted(result: dict[str, Any]) -> dict[str, Any]:
+            if approval_ignored:
+                result['approvalIgnored'] = True
+                result['message'] = f"{result.get('message') or ''}{note}".strip()
+            return result
+
+        if import_json is not None and str(import_json).strip() != '':
+            if len(str(import_json)) > MAX_IMPORT_CHARS:
+                return _ok(
+                    {
+                        'ok': False,
+                        'error': 'IMPORT_TOO_LARGE',
+                        'message': f'import_json is larger than {MAX_IMPORT_CHARS:,} characters; split it.',
+                    }
+                )
+            limit = min(max(int(import_limit or 200), 1), MAX_SYNC_WRITES)
+            if sync:
+                result = await sync_plugin_export(
+                    brain,
+                    import_json,
+                    source_plugin=source_plugin,
+                    approve=approve,
+                    dry_run=dry_run,
+                    limit=limit,
+                    agent=agent_label,
+                    extra_tags=extra_tags,
+                )
+                counts = result.get('counts') or {}
+                wrote = sum(counts.get(k, 0) for k in ('created', 'updated', 'superseded'))
+            else:
+                result = await brain.import_plugin_export(
+                    import_json,
+                    source_plugin=source_plugin,
+                    approve=approve,
+                    dry_run=dry_run,
+                    limit=limit,
+                    extra_tags=extra_tags,
+                    agent=agent_label,
+                )
+                wrote = int(result.get('count', 0)) - int(result.get('duplicates', 0))
+            if result.get('ok') and not dry_run and wrote > 0:
+                await charge()
+            return _ok(noted(result))
+
+        if url and str(url).strip():
+            clean_url = url.strip()
+            blocked = await check_url_async(clean_url)  # validate before registering anything
+            if blocked:
+                return _ok(
+                    {
+                        'ok': False,
+                        'error': blocked,
+                        'message': 'Only public http/https URLs are supported for source ingest.',
+                        'url': clean_url,
+                    }
+                )
+            if dry_run:
+                return _ok(
+                    {
+                        'ok': True,
+                        'dryRun': True,
+                        'message': f'Would ingest source {clean_url}',
+                        'url': clean_url,
+                    }
+                )
+            source_tags = [*(tags or []), *extra_tags]
+            ingest = None
+            if ingest_mode == INGEST_QUEUE and fetch_content:
+                # Hosted server: try a quick fetch now so the page is usable at once; only a slow
+                # or temporarily failing page is left for the background worker.
+                try:
+                    async with asyncio.timeout(QUICK_FETCH_SECS):
+                        ingest = await fetch_landing_page(clean_url)
+                except TimeoutError:
+                    ingest = None
+                if ingest is None or (not ingest.get('ok') and ingest.get('error') in ('TIMEOUT', 'HTTP_ERROR')):
+                    result = await brain.ingest_enqueue(clean_url, title=title, tags=source_tags)
+                    if result.get('ok') and result.get('queued'):
+                        result['message'] = (
+                            'The page was slow to answer, so it is queued and will be fetched by itself. '
+                            'You are charged only when it is actually saved.'
+                        )
+                    return _ok(result)
+            elif fetch_content:
+                ingest = await fetch_landing_page(clean_url)
+            result = await brain.source_add(url=clean_url, title=title, tags=source_tags, ingest=ingest, auto=auto_mode)
+            fetched = ingest is None or bool(ingest.get('ok'))
+            if not result.get('ok'):
+                result['message'] = result.get('message', 'failed')
+            elif not fetched:
+                result['message'] = (
+                    f"Source registered ({result.get('source', {}).get('id')}) but the page could not be "
+                    f"fetched ({ingest.get('error')}); nothing was filed. Not charged."  # type: ignore[union-attr]
+                )
+            else:
+                src = result.get('source', {})
+                if src.get('alreadyDecided'):
+                    result['message'] = 'Nothing was filed: you already rejected or forgot this page. Not charged.'
+                    return _ok(result)
+                if ingest and src.get('filedNew') is False:
+                    result['message'] = (
+                        'Nothing new was filed: the page had no readable text.'
+                        if not src.get('proposedMemoryId')
+                        else 'Nothing new was filed: this page is already in your memory.'
+                    ) + ' Not charged.'
+                    return _ok(result)
+                parts = src.get('passageCount')
+                result['message'] = f"Page saved ({src.get('id')})" + (
+                    f' with {parts} searchable passages' if parts else ''
+                ) + '. It waits in the inbox; approving the page approves its passages too.' if ingest else f"Source registered ({src.get('id')})"
+            if result.get('ok') and not result.get('duplicate') and fetched:
+                await charge()
+                if auto_mode and ingest:
+                    done = result.get('source', {})
+                    verdict = {'approved': bool(done.get('autoSaved')), 'reasons': done.get('autoReasons') or []}
+                    result['autoApproval'] = {k: v for k, v in verdict.items() if k != 'memory'}
+                    if verdict.get('approved'):
+                        parts = result.get('source', {}).get('passageCount')
+                        what = 'Page'
+                        if ingest.get('kind') == 'youtube':
+                            what = 'Video transcript' if ingest.get('hasTranscript') else 'Video title and description (no transcript was available)'
+                        result['message'] = f'{what} saved and ready to search' + (f' ({parts} passages).' if parts else '.')
+                    elif verdict.get('reasons') and verdict['reasons'] != ['not_automatic']:
+                        result['message'] = (
+                            f"Page saved, but it waits for the owner ({', '.join(verdict['reasons'])}). "
+                            'It is not searchable until they approve it in the dashboard.'
+                        )
+            return _ok(result)
+
+        if not title or not content:
+            return _ok(
+                {
+                    'ok': False,
+                    'error': 'INVALID_INPUT',
+                    'message': (
+                        'Provide title+content, url for source ingest, or import_json '
+                        'from an agent memory plugin export.'
+                    ),
+                }
+            )
+
+        note_tags = [*(tags or []), *extra_tags]
+        note_prov: dict[str, Any] = {'agent': agent_label} if agent_label else {}
+        keep, why, rule = False, [], ''
+        decided = auto_mode and not dry_run
+        if decided:  # the owner's rules are applied first, so an allowed note is written once, as kept
+            keep, why, rule = await brain.note_decision(
+                title=str(title).strip(), content=str(content).strip(), memory_type=type or 'note',
+                confidence=float(confidence), tags=note_tags, provenance=note_prov,
+            )  # fmt: skip
+        result = await brain.memory_save(
+            title=title,
+            content=content,
+            memory_type=type,
+            tags=note_tags,
+            citations=citations,
+            confidence=confidence,
+            approve=approve or keep,
+            dedupe_key=dedupe_key,
+            dry_run=dry_run,
+            provenance=({**note_prov, 'autoApproved': {'rule': rule}} if keep else note_prov) or None,
+            expires_at=_expiry(expires_in_days),
+        )
+        mid = (result.get('memory') or {}).get('id')
+        wrote = bool(result.get('ok', True)) and not dry_run and not result.get('duplicate')
+        if keep:
+            await brain.note_decision_settle(memory_id=mid, title=str(title), rule=rule, saved=wrote)
+        result['message'] = result.get('message') or (
+            f"{'Would save' if dry_run else 'Proposed'} memory {mid} "
+            f"status={(result.get('memory') or {}).get('status')}"
+        )
+        if wrote:
+            await charge()
+            if decided:
+                result['autoApproval'] = {'approved': keep, **({'rule': rule} if keep else {'reasons': why})}
+                if keep:
+                    result['message'] = f'Saved and approved automatically ({rule}): {mid}'
+                else:
+                    result['message'] = f'Saved {mid}; waiting for the owner ({", ".join(why)}).'
+        return _ok(noted(result))
+
+    @server.tool()
+    async def inbox_list() -> dict:
+        """
+        List proposed memories awaiting human approval, as cards. Use before inbox_approve/reject.
+        Free.
+        """
+        brain = await get_brain()
+        result = await brain.inbox_list()
+        result['message'] = f"{result.get('count', 0)} proposed"
+        return _ok(result)
+
+    @server.tool()
+    async def inbox_approve(
+        memory_id: str | None = None,
+        memory_ids: list[str] | None = None,
+        dry_run: bool = False,
+    ) -> dict:
+        """
+        Approve one memory_id or a batch memory_ids (max 100) into searchable canon.
+        dry_run previews without writing. Charged $0.01 per call that approved something.
+        """
+        if human_only:
+            return _ok({'ok': False, 'error': 'APPROVAL_REQUIRES_HUMAN', 'message': HUMAN_APPROVAL_MESSAGE})
+        brain = await get_brain()
+        ids = list(memory_ids or [])
+        if memory_id and str(memory_id).strip():
+            ids.insert(0, str(memory_id).strip())
+        uniq = list(dict.fromkeys(i for i in ids if i))  # unique, order preserved
+        if not uniq:
+            return _ok({'ok': False, 'error': 'INVALID_INPUT', 'message': 'memory_id or memory_ids required'})
+        if auto_mode:  # the owner's policy decides each one; nothing is approved blindly
+            uniq = uniq[:100]
+            if dry_run:
+                return _ok({'ok': True, 'dryRun': True, 'message': f'Would check {len(uniq)} against the policy'})
+            approved: list[str] = []
+            needs_owner: list[dict[str, Any]] = []
+            for mid in uniq:
+                verdict = await brain.consider_auto_approval(mid)
+                if verdict.get('approved'):
+                    approved.append(mid)
+                else:
+                    needs_owner.append({'id': mid, 'reasons': verdict.get('reasons')})
+            if approved:
+                await charge()
+            return _ok(
+                {
+                    'ok': True,
+                    'approved': len(approved),
+                    'approvedIds': approved,
+                    'needsOwner': needs_owner,
+                    'message': f'{len(approved)} approved by policy, {len(needs_owner)} need the owner',
+                }
+            )
+        if len(uniq) == 1 and not dry_run:
+            result = await brain.inbox_approve(uniq[0])
+            result['message'] = result.get('message') or f'Approved {uniq[0]}'
+            if result.get('ok', True):
+                await charge()
+            return _ok(result)
+        result = await brain.inbox_approve_many(uniq, dry_run=dry_run)
+        if result.get('ok') and not dry_run and result.get('approved', 0) > 0:
+            await charge()
+        return _ok(result)
+
+    @server.tool()
+    async def inbox_reject(memory_id: str, reason: str | None = None) -> dict:
+        """
+        Reject a proposed memory (status=rejected, removed from inbox). Charged $0.01.
+        """
+        brain = await get_brain()
+        result = await brain.inbox_reject(memory_id, reason=reason)
+        result['message'] = result.get('message') or f'Rejected {memory_id}'
+        if result.get('ok', True):
+            await charge()
+        return _ok(result)
+
+    @server.tool()
+    async def memory_search(
+        query: str,
+        approved_only: bool = True,
+        limit: int = 20,
+        tags: list[str] | None = None,
+        statuses: list[str] | None = None,
+        scope: str | None = None,
+    ) -> dict:
+        """
+        Indexed BM25 search (thin index; no full-body scan). Returns cards + receipt
+        (sourceUris, matchedTerms, rank). Approved-only by default. scope restricts to
+        memories filed under that scope. Use memory_explain for the full body. Free.
+        """
+        brain = await get_brain()
+        if statuses:  # forgotten / rejected memories stay owner-only (CLI); agents never read them back
+            statuses = [x for x in statuses if str(x).lower() not in ('decayed', 'rejected')] or None
+        result = await brain.memory_search(
+            query,
+            approved_only=approved_only,
+            statuses=statuses,
+            limit=min(max(int(limit or 20), 1), 50),
+            tags=tags,
+            scope=scope,
+        )
+        result['message'] = f"{result.get('count', 0)} hits for {query!r}"
+        return _ok(result)
+
+    @server.tool()
+    async def memory_explain(memory_id: str) -> dict:
+        """
+        Expand one memory: full body, citations/source URIs, and an audit receipt of its recent
+        history (why it is in canon). Use after memory_search or inbox_list. Free.
+        """
+        brain = await get_brain()
+        result = await brain.memory_explain(memory_id)
+        if str(((result.get('memory') or {}).get('status')) or '').lower() in ('decayed', 'rejected'):
+            return _ok({'ok': False, 'error': 'OWNER_ONLY', 'message': 'This memory was forgotten or rejected; only the owner can read it (CLI).'})
+        return _ok(result)
+
+    @server.tool()
+    async def memory_forget(memory_id: str, reason: str | None = None) -> dict:
+        """
+        Soft-decay a memory (status=decayed). Record kept for audit; excluded from default search.
+        Charged $0.01.
+        """
+        brain = await get_brain()
+        result = await brain.memory_forget(memory_id, reason=reason)
+        result['message'] = result.get('message') or f'Decayed {memory_id}'
+        if result.get('ok', True) and result.get('changed', True):
+            await charge()
+        return _ok(result)
+
+    @server.tool()
+    async def brain_health(
+        include_sources: bool = True,
+        remove_source_id: str | None = None,
+        repair_index: bool = False,
+    ) -> dict:
+        """
+        Health + counts by lifecycle, storage backend, ingest-queue depth, sources, tool surface.
+        remove_source_id drops a source; repair_index rebuilds the index/manifest/inbox from the
+        stored memories (use if two agents wrote at once and a memory looks missing). Free.
+        """
+        brain = await get_brain()
+        result = await brain.brain_health(
+            include_sources=include_sources,
+            remove_source_id=remove_source_id,
+            repair_index=repair_index,
+        )
+        result['approvalMode'] = approval
+        result['message'] = (
+            f"memories={result.get('memoryTotal', 0)} inbox={result.get('inboxCount', 0)} "
+            f"sources={result.get('sourceCount', 0)} queue={result.get('ingestQueueJobs', 0)} "
+            f"backend={result.get('backend')} approval={approval}"
+        )
+        return _ok(result)
+
+    @server.tool()
+    async def recent_followed_content(days: int = 7, limit: int = 20, follow_id: str | None = None) -> dict:
+        """
+        What the owner follows (YouTube channels, blogs, newsletters), newest first: titles,
+        short summaries and links of items from the last `days` days. Answers "what did I
+        read or watch lately?". Use memory_search with tags=['followed'] to search inside it.
+        Only the owner can add or remove followed sources (CLI). Free.
+        """
+        brain = await get_brain()
+        result = await recent_followed(brain, days=days, limit=limit, follow_id=follow_id)
+        result['message'] = f"{result.get('count', 0)} followed item(s) in the last {days} day(s)"
+        return _ok(result)
+
+    @server.tool()
+    async def memory_context(
+        query: str,
+        token_budget: int = 1500,
+        scope: str | None = None,
+        include_followed: bool = True,
+        max_items: int = 8,
+    ) -> dict:
+        """
+        START HERE. One call returns a ready-to-use context block: what the owner always wants
+        (preferences), the memories that best match `query`, and what they followed lately -
+        trimmed to token_budget (about 4 characters per token). Replaces several search/explain
+        calls. Free.
+        """
+        brain = await get_brain()
+        result = await build_context(
+            brain,
+            query,
+            token_budget=token_budget,
+            scope=scope,
+            include_followed=include_followed,
+            max_items=max_items,
+        )
+        result['message'] = f"{result.get('count', 0)} item(s), about {result.get('approxTokens', 0)} tokens"
+        return _ok(result)
+
+    @server.tool()
+    async def memory_capture(
+        text: str,
+        scope: str | None = None,
+        agent: str | None = None,
+        dry_run: bool = False,
+    ) -> dict:
+        """
+        Hand over what the USER said in the conversation (their own words, not your reply). Lasting
+        preferences, decisions and facts about them are found by built-in rules plus an AI step
+        (the server's built-in one, or the owner's own model), saved, and kept by the owner's rules.
+        Safe to call after every user turn: duplicates are ignored and secrets are held back.
+        dry_run lists what the rules alone would save. Charged $0.01 once per call that saved
+        something; the built-in AI step adds its own small charge only when it found a fact.
+        """
+        brain = await get_brain()
+        found = extract_candidates(text)
+        smart_used = False
+        if brain.extractor is not None and (text or '').strip():
+            try:  # the user's own model; the rules above stand alone if it fails or is slow
+                found = merge_candidates(found, await brain.extractor.extract(text))
+                smart_used = True
+            except Exception as exc:  # noqa: BLE001 - any provider failure falls back to the rules
+                logger.warning('smart capture failed: %s: %s', type(exc).__name__, str(exc)[:200])
+        elif builtin_ai.provider is not None and not dry_run:
+            # No key of their own: the built-in AI helps, at its own small price, only when it finds something.
+            extra, ai_used = await builtin_ai.provider.find(brain, text, found)
+            if ai_used:
+                found = [*found, *extra]
+                smart_used = True
+        if not found:
+            return _ok({'ok': True, 'found': 0, 'saved': 0, 'message': 'Nothing worth remembering found.'})
+        if dry_run:
+            return _ok({'ok': True, 'dryRun': True, 'found': len(found), 'candidates': found})
+        scope_tag = scope_tag_for(scope)
+        label = (agent or '').strip()[:80] or None
+        result = await brain.save_captured(found, tags=[scope_tag] if scope_tag else [], agent=label, auto=auto_mode)
+        saved: list[dict[str, Any]] = result['items']
+        already, failed = result['already'], result['failed']
+        if saved:
+            await charge()  # one tool-call for the whole call, however many facts it saved
+        auto_count = sum(1 for r in saved if r.get('approved'))
+        return _ok(
+            {
+                'ok': True,
+                'found': len(found),
+                'saved': len(saved),
+                'smartCapture': smart_used,
+                'alreadyKnown': already,
+                'failed': failed,
+                'autoApproved': auto_count,
+                'items': saved,
+                'message': f'{len(saved)} saved, {auto_count} approved automatically, {len(saved) - auto_count} waiting'
+                + (f', {failed} could not be saved' if failed else ''),
+            }
+        )
+
+    @server.resource(uri='braintwin://about', name='braintwin-about')
+    def about() -> str:
+        """Describe this personal-memory MCP server (not official Apify MCP)."""
+        return (
+            f'Braintwin (Personal Memory) v{VERSION} — community Actor by khadinakbar. '
+            'This is NOT the official Apify MCP server (mcp.apify.com). '
+            'Eleven tools: memory_context (start here), memory_propose (notes|url|plugin import_json|incremental sync), '
+            'memory_capture (find lasting facts in what the user said), inbox_list, inbox_approve (batch), '
+            'inbox_reject, memory_search (thin index + receipts + scope), memory_explain, memory_forget, '
+            'brain_health, recent_followed_content (what the owner follows). Reads are free; only saves/approvals are '
+            'charged on Apify. Lifecycle: working → proposed → approved | rejected | decayed.'
+        )
+
+
+def build_server(
+    *,
+    get_brain: BrainGetter,
+    charge: Charger,
+    ingest_mode: str,
+    approval: str | None = None,
+) -> FastMCP:
+    mode = approval or resolve_approval_mode()
+    instructions = INSTRUCTIONS + (
+        ' Approval is owner-only on this server: you can propose, but only the owner can approve.'
+        if mode == APPROVAL_HUMAN
+        else (
+            " The owner's policy approves safe notes automatically; check result.autoApproval and"
+            ' never retry a refused one - it waits for the owner.'
+            if mode == APPROVAL_AUTO
+            else ''
+        )
+    )
+    server = FastMCP('braintwin', instructions=instructions, version=VERSION)
+    register_tools(server, get_brain=get_brain, charge=charge, ingest_mode=ingest_mode, approval=mode)
+    return server
