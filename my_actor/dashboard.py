@@ -525,7 +525,7 @@ class DashboardMiddleware:
                 tags=_clean_tags(body.get('tags')) + ['dashboard'],
                 confidence=1.0,
                 approve=True,  # typed by the owner in their own dashboard
-                provenance={'via': 'dashboard'},
+                provenance={'via': 'dashboard', 'how': 'typed'},
             )
             if res.get('ok', True) and not res.get('duplicate'):
                 await self.charge()

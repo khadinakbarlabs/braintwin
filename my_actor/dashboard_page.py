@@ -237,6 +237,7 @@ function card(m,actions){
     h('p',{text:m.snippet||m.summary||''}),
     h('div',{class:'meta'},h('span',{class:'kind',text:m.kind||KIND[m.type]||m.type||''}),h('span',{text:when(m.updatedAt||m.approvedAt)}),tags),
     m.useWhen?h('p',{class:'use',text:'AI tools use this: '+lower1(m.useWhen)}):null,
+    m.origin&&m.origin.how&&m.origin.how!=='unknown'?h('p',{class:'note',text:m.origin.line}):null,
     h('div',{class:'row'},h('button',{class:'btn link',type:'button',text:'Open',onclick:function(){openMemory(m.id)}}),actions||null));
   return li;
 }
@@ -264,6 +265,11 @@ function openMemory(id){
     body.appendChild(h('h2',{text:m.title||id}));
     body.appendChild(h('div',{class:'meta'},c.kind?h('span',{class:'kind',text:c.kind}):null,h('span',{text:m.status==='approved'?'kept':m.status==='proposed'?'waiting':m.status==='decayed'?'forgotten':m.status||''})));
     if(c.useWhen)body.appendChild(h('p',{class:'use',text:'AI tools use this: '+lower1(c.useWhen)}));
+    var o=r.origin||{},u=r.usage||{};
+    function fact(k,v){return v?h('p',{class:'note'},h('b',{text:k+': '}),h('span',{text:String(v)})):null;}
+    [fact('Where it came from',o.line),fact('Why it was kept',o.why),fact('Your words at the time',o.sourceWords),fact('Whose words',o.trust),fact('Status',o.approval),
+     fact('Replaced an older memory',o.replaces),fact('Good until',when(o.validUntil)),fact('Check first',o.check),
+     fact('How AI tools use it',u.how),fact('Where it applies',u.where)].forEach(function(n){if(n)body.appendChild(n);});
     body.appendChild(h('pre',{text:m.content||m.summary||'(no content)'}));
     var cites=(m.citations||[]).map(function(c){return c&&c.url}).filter(Boolean);
     if(cites.length)body.appendChild(h('p',{class:'note',text:'Sources: '+cites.join(', ')}));

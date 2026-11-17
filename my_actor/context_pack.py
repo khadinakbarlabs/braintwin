@@ -14,6 +14,7 @@ from typing import Any
 
 from .brain import BrainStore
 from .follow import recent_followed
+from .origin import origin_tag
 from .purpose import GROUP_HEADINGS, GROUP_ORDER, purpose_of
 from .ranking import SCORER
 
@@ -28,12 +29,14 @@ def _one_line(value: Any) -> str:
     return ' '.join(str(value or '').split())
 
 
-def _line(title: Any, summary: Any, mid: Any) -> str:
+def _line(title: Any, summary: Any, mid: Any, origin: dict[str, Any] | None = None) -> str:
     title = _one_line(title)
     body = _one_line(summary)
     if len(body) > SUMMARY_CAP:
         body = body[:SUMMARY_CAP].rstrip() + '…'
-    return f'- {title}: {body} [{mid}]' if body else f'- {title} [{mid}]'
+    text = f'- {title}: {body}' if body else f'- {title}'
+    tag = origin_tag(origin)  # how it was saved, by which tool, which day
+    return f'{text} ({tag}) [{mid}]' if tag else f'{text} [{mid}]'
 
 
 async def build_context(
@@ -55,13 +58,13 @@ async def build_context(
     grouped: dict[str, list[tuple[str, dict[str, Any]]]] = {g: [] for g in GROUP_ORDER}
     for c in profile:
         group = purpose_of(c.get('type'), c.get('tags')).group
-        grouped[group].append((_line(c['title'], c['summary'], c['id']), {'id': c['id'], 'from': 'profile', 'use': group}))
+        grouped[group].append((_line(c['title'], c['summary'], c['id'], c.get('origin')), {'id': c['id'], 'from': 'profile', 'use': group}))
     for r in hits:
         card = r['memory']
         group = purpose_of(card.get('type'), card.get('tags')).group
         grouped[group].append(
             (
-                _line(card['title'], card['summary'], card['id']),
+                _line(card['title'], card['summary'], card['id'], card.get('origin')),
                 {'id': card['id'], 'from': 'search', 'use': group, 'score': r['score'], 'matched': r['receipt']['matchedTerms']},
             )
         )

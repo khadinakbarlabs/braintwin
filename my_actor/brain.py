@@ -53,6 +53,7 @@ from .ingest import check_url_async
 from .ingest_queue import IngestQueue, job_id_for
 from .ranking import MAX_QUERY_CHARS, QUERY_STOPWORDS, SCORER, RankIndex, hybrid_rank, is_expired, stem_tokens
 from .import_memories import normalize_plugin_export
+from .origin import SAID, context_provenance, origin_of, usage_of
 from .policy import evaluate as evaluate_policy
 from .policy import MAX_REPLACEMENTS_PER_DAY, MODE_OPEN, OPEN_CAP_FACTOR, load_policy, normalize_title_key
 from .storage import open_storage
@@ -1204,7 +1205,14 @@ class BrainStore:
             await self._kv.set_value(KEY_AUTO_STATS, stats)
 
     async def save_captured(
-        self, candidates: list[dict[str, Any]], *, tags: list[str], agent: str | None, auto: bool
+        self,
+        candidates: list[dict[str, Any]],
+        *,
+        tags: list[str],
+        agent: str | None,
+        auto: bool,
+        situation: str | None = None,
+        source_text: str | None = None,
     ) -> dict[str, Any]:
         """Save facts found in what the user said, in ONE pass over storage.
 
@@ -1223,7 +1231,10 @@ class BrainStore:
             if same is not None:
                 already += 1  # said before in nearly the same words
                 continue
-            provenance: dict[str, Any] = {'captured': cand['reason']}
+            provenance: dict[str, Any] = {
+                'captured': cand['reason'],
+                **context_provenance(how=SAID, situation=situation, source_text=source_text),
+            }
             if agent:
                 provenance['agent'] = agent
             if old:
@@ -1932,6 +1943,8 @@ use_meaning
             'ok': True,
             'memory': rec,
             'card': memory_card(rec, snippet_chars=500),
+            'origin': origin_of(rec),
+            'usage': usage_of(rec.get('type'), rec.get('tags')),
             'related': await self._related_cards(rec),
             'receipt': {
                 'memoryId': memory_id,

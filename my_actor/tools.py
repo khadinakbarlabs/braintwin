@@ -26,6 +26,7 @@ from .brain import BrainStore, scope_tag_for
 from . import builtin_ai
 from .capture import extract_candidates
 from .extractor import merge_candidates
+from .origin import PROPOSED, context_provenance
 from .constants import (
     APPROVAL_AGENT,
     APPROVAL_AUTO,
@@ -135,6 +136,9 @@ def register_tools(
         agent: str | None = None,
         scope: str | None = None,
         expires_in_days: int | None = None,
+        situation: str | None = None,
+        reason: str | None = None,
+        source_text: str | None = None,
     ) -> dict:
         """
         Propose memory into the approval inbox (default). Modes:
@@ -146,6 +150,11 @@ def register_tools(
         overwrite), and rejected/forgotten ones are left alone. Safe to re-run.
         agent labels who filed it; scope (e.g. a project name) lets memory_search filter by it.
         expires_in_days makes a note disappear from search after that many days (e.g. a promo).
+        Always say where the note comes from, so any tool reading it later knows the context:
+        situation = what you and the user were doing when this came up (one short sentence, e.g.
+        "planning the March launch email"); reason = why it is worth keeping; source_text = the
+        user's own words it is based on, copied exactly. These are shown back on every memory card
+        under origin, with useWhen / useHow / appliesTo saying when, how and where to use it.
         By default notes and web pages are saved for good at once (result.autoApproval says yes/no
         and why); the owner can switch to reviewing first. Imports always wait for the owner.
         dry_run previews without writing.
@@ -303,7 +312,10 @@ def register_tools(
             )
 
         note_tags = [*(tags or []), *extra_tags]
-        note_prov: dict[str, Any] = {'agent': agent_label} if agent_label else {}
+        note_prov: dict[str, Any] = {
+            **({'agent': agent_label} if agent_label else {}),
+            **context_provenance(how=PROPOSED, situation=situation, reason=reason, source_text=source_text),
+        }
         keep, why, rule = False, [], ''
         decided = auto_mode and not dry_run
         if decided:  # the owner's rules are applied first, so an allowed note is written once, as kept
@@ -432,8 +444,10 @@ def register_tools(
         """
         Use when you need one specific thing from memory and memory_context did not bring it
         (a name, a past decision, a saved page). Returns short cards, best match first. Each
-        card says what it is (kind) and when to use it (useWhen): follow rules and decisions,
-        treat facts as true, treat saved pages as background only. Only kept memories by
+        card says what it is (kind), when to use it (useWhen), how (useHow), where it applies
+        (appliesTo) and where it came from (origin: how it was saved, by which tool, when, in
+        which situation, whose words it is, and a check note when it is old). Follow rules and
+        decisions, treat facts as true, treat saved pages as background only. Only kept memories by
         default; scope narrows to one project. Use memory_explain for the full text. Free.
         """
         brain = await get_brain()
@@ -454,7 +468,9 @@ def register_tools(
     async def memory_explain(memory_id: str) -> dict:
         """
         Use when a card is not enough and you need the whole memory. Returns the full text,
-        where it came from, when it was kept, and up to three related memories on the same
+        origin (how it was saved, by which tool, when, in which situation, why, the user's own
+        words, whose words it is and how far to trust it, what it replaced, until when it holds),
+        usage (when, how and where to use it) and up to three related memories on the same
         subject. Use after memory_search, memory_context or inbox_list. Free.
         """
         brain = await get_brain()
@@ -550,12 +566,15 @@ def register_tools(
         scope: str | None = None,
         agent: str | None = None,
         dry_run: bool = False,
+        situation: str | None = None,
     ) -> dict:
         """
         Hand over what the USER said in the conversation (their own words, not your reply). Lasting
         preferences, decisions and facts about them are found by built-in rules plus an AI step
         (the server's built-in one, or the owner's own model), saved, and kept by the owner's rules.
         Safe to call after every user turn: duplicates are ignored and secrets are held back.
+        situation = one short sentence on what you and the user were working on; it is stored with
+        each saved fact, next to the user's own words, so a tool reading it later knows the context.
         dry_run lists what the rules alone would save. Charged $0.01 once per call that saved
         something; the built-in AI step adds its own small charge only when it found a fact.
         """
@@ -580,7 +599,10 @@ def register_tools(
             return _ok({'ok': True, 'dryRun': True, 'found': len(found), 'candidates': found})
         scope_tag = scope_tag_for(scope)
         label = (agent or '').strip()[:80] or None
-        result = await brain.save_captured(found, tags=[scope_tag] if scope_tag else [], agent=label, auto=auto_mode)
+        result = await brain.save_captured(
+            found, tags=[scope_tag] if scope_tag else [], agent=label, auto=auto_mode,
+            situation=situation, source_text=text,
+        )
         saved: list[dict[str, Any]] = result['items']
         already, failed = result['already'], result['failed']
         if saved:
@@ -611,7 +633,7 @@ def register_tools(
             'memory_capture (find lasting facts in what the user said), inbox_list, inbox_approve (batch), '
             'inbox_reject, memory_search (find one specific thing), memory_explain (full text and related memories), memory_forget, '
             'brain_health, recent_followed_content (what the owner follows). Reads are free; only saves/approvals are '
-            'charged on Apify. Every memory card says what it is (kind) and when to use it (useWhen). '
+            'charged on Apify. Every memory card says what it is (kind), when and how to use it (useWhen, useHow), where it applies (appliesTo) and where it came from (origin). When you save, pass situation, reason and source_text so the next tool knows the context. '
             'A memory is waiting, kept, declined or forgotten; AI tools only see kept ones.'
         )
 
