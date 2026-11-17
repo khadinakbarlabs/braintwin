@@ -8,6 +8,7 @@ from collections import Counter
 from typing import Any
 
 from .constants import INDEX_TOKEN_CHARS, SUMMARY_CHARS
+from .purpose import purpose_fields
 
 _TOKEN_RE = re.compile(r'[a-z0-9_]+', re.IGNORECASE)
 
@@ -74,6 +75,7 @@ def memory_card(record: dict[str, Any], *, snippet_chars: int = 240) -> dict[str
         'citations': list(record.get('citations') or []),
         'updatedAt': record.get('updatedAt'),
         'approvedAt': record.get('approvedAt'),
+        **purpose_fields(record.get('type'), record.get('tags')),
     }
 
 
@@ -94,6 +96,7 @@ def card_from_index_entry(entry: dict[str, Any], *, snippet_chars: int = 240) ->
         'citations': [{'url': u} for u in uris],
         'updatedAt': entry.get('updatedAt'),
         'approvedAt': entry.get('approvedAt'),
+        **purpose_fields(entry.get('type'), entry.get('tags')),
     }
 
 

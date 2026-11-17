@@ -218,25 +218,26 @@ function viewMove(){
   box.appendChild(h('div',{class:'hero'},h('h2',{text:'One memory, in the cloud or on your computer'}),
     h('p',{text:'Use Braintwin in the cloud, on your own computer, or both. You can copy your memory in either direction at any time, and running a copy twice never makes duplicates.'})));
   var up=h('section',{class:'card'},h('span',{class:'way',text:'Your computer → cloud'}),h('h2',{text:'Send local memory to the cloud'}));
-  snip(up,'','For when you started on your own computer and now want the same memory in ChatGPT, Claude on the web and other online tools.','python -m my_actor.cli move --from sqlite --to apify');
+  snip(up,'','For when you started on your own computer and now want the same memory in ChatGPT, Claude on the web and other online tools.','~/.braintwin/venv/bin/braintwin-cli move --from sqlite --to apify');
   var down=h('section',{class:'card'},h('span',{class:'way',text:'Cloud → your computer'}),h('h2',{text:'Bring cloud memory to your computer'}));
-  snip(down,'','For when you want a private copy that works on your own computer, even without internet.','python -m my_actor.cli move --from apify --to sqlite');
+  snip(down,'','For when you want a private copy that works on your own computer, even without internet.','~/.braintwin/venv/bin/braintwin-cli move --from apify --to sqlite');
   box.appendChild(h('div',{class:'duo'},up,down));
   var how=h('details',{class:'card'},h('summary',{text:'How to run these two commands'}));box.appendChild(how);
   how.appendChild(h('ul',{class:'list steps'},
-    h('li',{class:'item'},h('h3',{text:'Open a terminal in the Braintwin folder on your computer'})),
+    h('li',{class:'item'},h('h3',{text:'Install Braintwin on your computer first'}),h('p',{text:'One line, shown under Run Braintwin on your own computer below. Then open a terminal.'})),
     h('li',{class:'item'},h('h3',{text:'Set your Apify token once'}),h('p',{text:'It is under Settings, API and Integrations in Apify Console. Keep it private.'})),
     h('li',{class:'item'},h('h3',{text:'Try it first'}),h('p',{text:'Add --dry-run to the command to see what would be copied. Nothing is written.'})),
     h('li',{class:'item'},h('h3',{text:'Run the command'}),h('p',{text:'Only kept memories are copied. Waiting, declined and forgotten items stay where they are.'}))));
-  snip(how,'','Set the token (Mac or Linux):','export APIFY_TOKEN=YOUR_APIFY_TOKEN');
+  snip(how,'','Set the token (Mac or Linux), and add the small helper the copy needs, once:','export APIFY_TOKEN=YOUR_APIFY_TOKEN\n~/.braintwin/venv/bin/python -m pip install apify-client');
   var file=h('section',{class:'card'},h('h2',{text:'Or move it as a file'}));box.appendChild(file);
   file.appendChild(h('p',{class:'note',text:'No terminal needed. Download everything you have kept as one file, for a backup or to carry it somewhere else. To bring a file in, use Bring in old notes.'}));
   var dl=h('button',{class:'btn acc',type:'button',text:'Download my memory'});
   dl.addEventListener('click',function(){var keep=state.status;state.status='approved';exportAll(dl);state.status=keep;});
   file.appendChild(h('div',{class:'row'},dl,h('button',{class:'btn ghost',type:'button',text:'Bring in a file',onclick:function(){go('import')}})));
-  var local=h('details',{class:'card'},h('summary',{text:'Run Braintwin on your own computer'}));box.appendChild(local);
-  local.appendChild(h('p',{class:'note',text:'The same memory tools can run as a small program on your computer. Your memories are then kept in one private file on your disk and nothing is sent anywhere. This needs Python and the Braintwin folder.'}));
-  snip(local,'Claude Code','Run once in your terminal. Use the full path to the folder.','claude mcp add braintwin -e PYTHONPATH=/FULL/PATH/TO/braintwin -- /FULL/PATH/TO/braintwin/.venv/bin/python -m my_actor.stdio');
-  snip(local,'Cursor, Claude Desktop and others','Add a local (command) MCP server. Use the full path to the folder.',JSON.stringify({mcpServers:{braintwin:{command:'/FULL/PATH/TO/braintwin/.venv/bin/python',args:['-m','my_actor.stdio'],env:{PYTHONPATH:'/FULL/PATH/TO/braintwin'}}}},null,2));
+  var local=h('section',{class:'card'},h('h2',{text:'Run Braintwin on your own computer'}));box.appendChild(local);
+  local.appendChild(h('p',{class:'note',text:'Free. Your memories are kept in one private file on your disk and nothing is sent anywhere. Needs Python 3.11 or newer.'}));
+  snip(local,'1. Install','Paste this one line into your terminal. It also prints the exact line for each AI tool.','curl -fsSL https://raw.githubusercontent.com/khadinakbarlabs/braintwin/main/install.sh | bash');
+  snip(local,'2. Connect Claude Code','Run once, then restart Claude Code.','claude mcp add braintwin -- ~/.braintwin/venv/bin/braintwin');
+  snip(local,'Cursor, Claude Desktop and others','Add a local (command) MCP server. Use the full path the installer printed.',JSON.stringify({mcpServers:{braintwin:{command:'/FULL/PATH/TO/.braintwin/venv/bin/braintwin'}}},null,2));
 }
 """

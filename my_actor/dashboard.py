@@ -34,6 +34,7 @@ from . import digest
 from . import builtin_ai
 from .autopilot import auto_status, set_follow_daily
 from .settings import on_platform as on_platform  # noqa: PLC0414
+from .capture import extract_candidates
 from .dashboard_page import render_page
 from .follow import follow_add, follow_list, follow_memory_ids, follow_remove, follow_sync, follow_update
 from .import_memories import text_to_records
@@ -512,7 +513,11 @@ class DashboardMiddleware:
                 return _err(400, 'INVALID_INPUT', 'title and content required')
             if len(title) > MAX_TITLE or len(content) > MAX_CONTENT:
                 return _err(400, 'TOO_LONG', f'Title max {MAX_TITLE}, content max {MAX_CONTENT} characters.')
-            mtype = str(body.get('type') or 'note').lower()
+            mtype = str(body.get('type') or 'auto').lower()
+            if mtype == 'auto':
+                # Work out what the sentence is (a rule, a fact about the owner, a decision) from its wording.
+                found = extract_candidates(content, max_items=1)
+                mtype = found[0]['type'] if found else 'note'
             res = await brain.memory_save(
                 title=title,
                 content=content,

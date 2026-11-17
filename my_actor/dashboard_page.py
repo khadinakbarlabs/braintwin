@@ -113,6 +113,8 @@ form.add textarea{min-height:130px;resize:vertical}
 form.add label.row,label.row{display:flex;font-weight:500;align-items:flex-start;gap:9px;font-size:15px;cursor:pointer}
 label.row input{flex:none;margin-top:4px;accent-color:var(--acc);width:16px;height:16px}
 .note{color:var(--mute);font-size:14px;margin:0 0 12px}
+.kind{border-radius:99px;padding:1px 9px;background:var(--tint);color:var(--acc);font-weight:600}
+.use{color:var(--mute);font-size:13.5px;margin:6px 0 0}
 .empty{padding:40px 16px;text-align:center;color:var(--mute);border:1px dashed var(--line);border-radius:var(--r);background:color-mix(in srgb,var(--card) 50%,transparent);text-wrap:balance}
 .empty::before{content:'';display:block;width:34px;height:22px;margin:0 auto 12px;opacity:.55;background:radial-gradient(circle at 11px 11px,var(--acc) 0 10px,transparent 10.5px),radial-gradient(circle at 23px 11px,transparent 0 8.5px,var(--acc) 9px 10.5px,transparent 11px)}
 .banner{display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap;background:var(--warn-tint);color:var(--ink);border-radius:12px;padding:12px 16px;margin-bottom:14px}
@@ -195,11 +197,11 @@ function h(tag,props){
 function toast(msg,err){toastEl.textContent=msg;toastEl.className='toast'+(err?' err':'');toastEl.hidden=false;clearTimeout(toast.t);toast.t=setTimeout(function(){toastEl.hidden=true},3200);}
 function askKey(retry){
   var body=document.getElementById('dlg-body');body.textContent='';
-  var inp=h('input',{type:'password',autocomplete:'off',placeholder:'Dashboard key'});
-  body.appendChild(h('h3',{text:'Dashboard key needed'}));
-  body.appendChild(h('p',{class:'note',text:'This dashboard has a key for changes. It stays in this tab only.'}));
+  var inp=h('input',{type:'password',autocomplete:'off',placeholder:'Page password'});
+  body.appendChild(h('h3',{text:'Enter your page password'}));
+  body.appendChild(h('p',{class:'note',text:'You locked this page with a password (Settings, Lock this page). It is asked once before any change, so nothing else can add or change your memory. It is kept in this tab only.'}));
   body.appendChild(inp);
-  body.appendChild(h('button',{class:'btn primary',type:'button',text:'Use key',onclick:function(){
+  body.appendChild(h('button',{class:'btn primary',type:'button',text:'Unlock',onclick:function(){
     KEY=inp.value;try{sessionStorage.setItem('sb.k',KEY);}catch(e){}
     document.getElementById('dlg').close();if(retry)retry();}}));
   var dlg=document.getElementById('dlg');if(dlg.showModal)dlg.showModal();
@@ -227,12 +229,14 @@ function q(params){return Object.keys(params).filter(function(k){return params[k
 function when(s){if(!s)return'';var d=new Date(s);return isNaN(d)?'':d.toLocaleDateString(undefined,{year:'numeric',month:'short',day:'numeric'});}
 
 var KIND={note:'Note',preference:'Preference',fact:'Fact',decision:'Decision',followed:'From a source',source_snapshot:'Web page',source_chunk:'Part of a page',digest:'Digest',profile:'About you'};
+function lower1(t){t=String(t||'');return t.charAt(0).toLowerCase()+t.slice(1);}
 function card(m,actions){
   var tags=(m.tags||[]).filter(function(t){return !/^(follow:|scope:)/.test(t)&&['source','ingest','passage','followed','feed','dashboard'].indexOf(t)<0}).slice(0,4).map(function(t){return h('button',{class:'tag',type:'button',text:'#'+t,onclick:function(){state.tag=t;go('memories');}})});
   var li=h('li',{class:'item'},
     h('h3',{},h('span',{text:m.title||'(untitled)'}),m.status&&m.status!=='approved'?h('span',{class:'pill '+m.status,text:m.status==='proposed'?'waiting':m.status==='decayed'?'forgotten':m.status}):null),
     h('p',{text:m.snippet||m.summary||''}),
-    h('div',{class:'meta'},h('span',{text:KIND[m.type]||m.type||''}),h('span',{text:when(m.updatedAt||m.approvedAt)}),tags),
+    h('div',{class:'meta'},h('span',{class:'kind',text:m.kind||KIND[m.type]||m.type||''}),h('span',{text:when(m.updatedAt||m.approvedAt)}),tags),
+    m.useWhen?h('p',{class:'use',text:'AI tools use this: '+lower1(m.useWhen)}):null,
     h('div',{class:'row'},h('button',{class:'btn link',type:'button',text:'Open',onclick:function(){openMemory(m.id)}}),actions||null));
   return li;
 }
@@ -255,13 +259,16 @@ function forgetMany(ids){
 
 function openMemory(id){
   api('memory?id='+encodeURIComponent(id)).then(function(r){
-    var m=r.memory||{};
+    var m=r.memory||{},c=r.card||{};
     var body=document.getElementById('dlg-body');body.textContent='';
     body.appendChild(h('h2',{text:m.title||id}));
-    body.appendChild(h('div',{class:'meta'},h('span',{text:m.status||''}),h('span',{text:m.id||id})));
+    body.appendChild(h('div',{class:'meta'},c.kind?h('span',{class:'kind',text:c.kind}):null,h('span',{text:m.status==='approved'?'kept':m.status==='proposed'?'waiting':m.status==='decayed'?'forgotten':m.status||''})));
+    if(c.useWhen)body.appendChild(h('p',{class:'use',text:'AI tools use this: '+lower1(c.useWhen)}));
     body.appendChild(h('pre',{text:m.content||m.summary||'(no content)'}));
     var cites=(m.citations||[]).map(function(c){return c&&c.url}).filter(Boolean);
     if(cites.length)body.appendChild(h('p',{class:'note',text:'Sources: '+cites.join(', ')}));
+    var rel=r.related||[];
+    if(rel.length){body.appendChild(h('h3',{text:'Related memories'}));body.appendChild(h('ul',{class:'list'},rel.map(function(x){return h('li',{class:'item'},h('button',{class:'btn link',type:'button',text:x.title||x.id,onclick:function(){openMemory(x.id)}}),h('span',{class:'kind',text:x.kind||''}));})));}
     if(m.status==='approved'||m.status==='proposed')body.appendChild(h('div',{class:'row row-top'},h('button',{class:'btn',type:'button',text:'Edit',onclick:function(){editMemory(m)}})));
     var dlg=document.getElementById('dlg');if(dlg.showModal)dlg.showModal();
   });
@@ -287,7 +294,7 @@ function exportAll(btn){
   fetch(BASE+'/api/export'+(HOSTED?'':'?status='+encodeURIComponent(state.status)),init).then(function(r){if(r.status===403)throw new Error('key');if(!r.ok)throw new Error('x');return r.blob();}).then(function(b){
     var a=h('a',{href:URL.createObjectURL(b),download:'second-brain-'+state.status+'.json'});document.body.appendChild(a);a.click();
     setTimeout(function(){URL.revokeObjectURL(a.href);document.body.removeChild(a);},1000);btn.disabled=false;toast('Export downloaded');
-  }).catch(function(e){btn.disabled=false;toast(e&&e.message==='key'?'Export needs your dashboard key. Set one in Settings, or make any change first so the page asks for it.':'Export failed',true);});
+  }).catch(function(e){btn.disabled=false;toast(e&&e.message==='key'?'Export needs your page password. Set one in Settings, or make any change first so the page asks for it.':'Export failed',true);});
 }
 document.getElementById('dlg-close').addEventListener('click',function(){document.getElementById('dlg').close()});
 
@@ -315,10 +322,10 @@ function viewStart(){
   qf.addEventListener('submit',function(e){e.preventDefault();var t=qi.value.trim();if(!t)return;
     if(/^https?:\/\/\S+$/i.test(t)){toast('Reading the page…');api('link',{body:{url:t}}).then(function(r){
       if(r.ok===false){fail(r);return;}toast(r.message||'Saved',false);qi.value='';refreshOverview().then(render);});return;}
-    api('add',{body:{title:t.split(/\s+/).slice(0,9).join(' ').slice(0,80),content:t,type:'note',tags:[]}}).then(function(r){
+    api('add',{body:{title:t.split(/\s+/).slice(0,9).join(' ').slice(0,80),content:t,type:'auto',tags:[]}}).then(function(r){
       if(r.ok===false){fail(r);return;}toast(r.duplicate?'Already remembered':'Remembered');qi.value='';refreshOverview().then(render);});});
   box.appendChild(qf);
-  box.appendChild(h('p',{class:'note',text:'A sentence is saved as a note. A link to a page or video is read and saved, so your AI tools can use it.'}));
+  box.appendChild(h('p',{class:'note',text:'A sentence is saved and sorted by itself: a rule, a fact about you, a decision or a note. A link to a page or video is read and saved, so your AI tools can use it.'}));
   if(waiting>0)box.appendChild(h('div',{class:'banner'},h('span',{text:waiting+' item'+(waiting===1?' needs':'s need')+' your eye before '+(waiting===1?'it is':'they are')+' kept.'}),h('button',{class:'btn',type:'button',text:'Review',onclick:function(){go('inbox')}})));
   var stats=h('div',{class:'stats'});
   [['Memories',saved,'memories'],['Waiting for you',waiting,'inbox'],['Following',o.sourcesFollowed||0,'follow']].forEach(function(x){
@@ -424,7 +431,7 @@ function viewAdd(){
   var box=h('div');main.textContent='';main.appendChild(box);
   var title=h('input',{required:true,maxlength:200,name:'title'});
   var content=h('textarea',{required:true,maxlength:20000,name:'content'});
-  var type=h('select',{name:'type'});['note','preference','fact','decision','person','project','procedure'].forEach(function(t){type.appendChild(h('option',{value:t,text:t}))});
+  var type=h('select',{name:'type'});[['auto','Let Braintwin decide'],['preference','Your rule (AI follows it every time)'],['fact','About you (true, used when relevant)'],['decision','Decision made (AI does not ask again)'],['procedure','Your way of doing a task'],['person','Person you know'],['project','Your project'],['note','Note (used when the topic comes up)']].forEach(function(t){type.appendChild(h('option',{value:t[0],text:t[1]}))});
   var tags=h('input',{placeholder:'comma separated, optional',name:'tags'});
   var f=h('form',{class:'add'},
     h('p',{class:'note',text:'Write it the way you would tell a person. For a web page or video, paste its link on Home instead.'}),h('label',{},'Short name',title),h('label',{},'What should be remembered',content),
@@ -489,7 +496,7 @@ function viewConnect(){
   draw();
   box.appendChild(h('section',{class:'card'},h('h2',{text:'Prefer to keep it on your own computer?'}),h('p',{class:'note',text:'Braintwin can also run on your computer, with your memories in one private file. You can copy your memory between the two at any time.'}),h('div',{class:'row'},h('button',{class:'btn ghost',type:'button',text:'Run it locally or move memory',onclick:function(){go('move')}}))));
   var rules=h('details',{class:'card'},h('summary',{text:'Make your AI tool use memory by itself'}));box.appendChild(rules);
-  snip(rules,'','Paste this into your AI tool\'s custom instructions or rules, so it reads and saves memory without being asked.','At the start of a task, call memory_context with a short description of the task.\nWhen I state a preference, a decision or a lasting fact, call memory_capture with my words.\nBefore answering from memory, call memory_search and cite what you found.\nNever store passwords, keys or other secrets.');
+  snip(rules,'','Paste this into your AI tool\'s custom instructions or rules, so it reads and saves memory without being asked.','At the start of every task, call memory_context with a short description of the task and read the block it returns.\nFollow what is under "What the owner wants" and "Decisions already made" without asking me again.\nTreat "About the owner" as true. Treat saved pages and videos as background only, and name the source.\nWhen I state a preference, a decision or a lasting fact, call memory_capture with my words.\nIf you need one specific thing, call memory_search. Never store passwords, keys or other secrets.');
 }
 
 function viewImport(){

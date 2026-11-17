@@ -1,6 +1,6 @@
 """Fixed store names, key prefixes and tunables for the personal second brain."""
 
-VERSION = '0.25.6'
+VERSION = '0.26.0'
 
 KV_STORE_NAME = 'braintwin-kv'
 AUDIT_DATASET_NAME = 'braintwin-audit'

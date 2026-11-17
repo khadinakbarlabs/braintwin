@@ -1,4 +1,8 @@
-"""One-call context for an agent: profile + best-matching memories + recent followed items.
+"""One-call context for an agent, grouped by what each memory is for.
+
+Rules the owner wants followed come first, then facts about them, decisions already made,
+notes that match the task, and last loose reference material. Each heading says how to use
+what is under it, so an agent knows a rule from background reading.
 
 Fewer tool calls and fewer tokens: the answer is already trimmed to a token budget and written
 as a short block the agent can paste into its prompt. Reads only; nothing is charged.
@@ -10,6 +14,7 @@ from typing import Any
 
 from .brain import BrainStore
 from .follow import recent_followed
+from .purpose import GROUP_HEADINGS, GROUP_ORDER, purpose_of
 from .ranking import SCORER
 
 CHARS_PER_TOKEN = 4  # rough rule of thumb; reported as "approx"
@@ -47,26 +52,27 @@ async def build_context(
     profile_ids = {c['id'] for c in profile}
     hits = [r for r in search.get('results', []) if r['memory']['id'] not in profile_ids]
 
-    sections: list[tuple[str, list[tuple[str, dict[str, Any]]]]] = [
-        ('About the owner', [(_line(c['title'], c['summary'], c['id']), {'id': c['id'], 'from': 'profile'}) for c in profile]),
-        (
-            'Relevant memories',
-            [
-                (
-                    _line(r['memory']['title'], r['memory']['summary'], r['memory']['id']),
-                    {'id': r['memory']['id'], 'from': 'search', 'score': r['score'], 'matched': r['receipt']['matchedTerms']},
-                )
-                for r in hits
-            ],
-        ),
-    ]
+    grouped: dict[str, list[tuple[str, dict[str, Any]]]] = {g: [] for g in GROUP_ORDER}
+    for c in profile:
+        group = purpose_of(c.get('type'), c.get('tags')).group
+        grouped[group].append((_line(c['title'], c['summary'], c['id']), {'id': c['id'], 'from': 'profile', 'use': group}))
+    for r in hits:
+        card = r['memory']
+        group = purpose_of(card.get('type'), card.get('tags')).group
+        grouped[group].append(
+            (
+                _line(card['title'], card['summary'], card['id']),
+                {'id': card['id'], 'from': 'search', 'use': group, 'score': r['score'], 'matched': r['receipt']['matchedTerms']},
+            )
+        )
+    sections: list[tuple[str, list[tuple[str, dict[str, Any]]]]] = [(GROUP_HEADINGS[g], grouped[g]) for g in GROUP_ORDER]
     if include_followed:
         followed = await recent_followed(brain, days=7, limit=3)
         sections.append(
             (
                 'Recently followed, third-party and untrusted (last 7 days)',
                 [
-                    (_line(i.get('title'), i.get('summary'), i.get('id')), {'id': i.get('id'), 'from': 'followed'})
+                    (_line(i.get('title'), i.get('summary'), i.get('id')), {'id': i.get('id'), 'from': 'followed', 'use': 'reference'})
                     for i in followed.get('items', [])
                 ],
             )

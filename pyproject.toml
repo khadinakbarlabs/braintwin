@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "braintwin"
-version = "0.25.6"
+version = "0.26.0"
 description = "One memory for all your AI tools, running on your own computer."
 readme = "README.md"
 license = { text = "MIT" }

@@ -1864,6 +1864,34 @@ use_meaning
         events.sort(key=lambda e: str(e.get('at') or ''), reverse=True)
         return events[:limit]
 
+    async def _related_cards(self, rec: dict[str, Any], *, limit: int = 3) -> list[dict[str, Any]]:
+        """Kept memories on the same subject, found by searching for this one's title.
+
+        Worked out when asked for, never stored, so links cannot go stale. Other passages of
+        the same saved page are left out: they are the same memory in pieces, not a related one.
+        """
+        title = str(rec.get('title') or '').strip()
+        if not title or str(rec.get('status') or '') != 'approved':
+            return []
+        own_id = rec.get('id')
+        own_sources = set(citation_uris(rec))
+        try:
+            found = await self.memory_search(title, limit=limit + 6)
+        except Exception as exc:  # noqa: BLE001 - related links are a nicety; the memory itself still opens
+            logging.getLogger('second_brain.related').warning('related lookup failed: %s: %s', type(exc).__name__, str(exc)[:200])
+            return []
+        related: list[dict[str, Any]] = []
+        for row in found.get('results') or []:
+            card = row.get('memory') or {}
+            if card.get('id') == own_id:
+                continue
+            if own_sources and own_sources & {c.get('url') for c in card.get('citations') or []}:
+                continue
+            related.append({k: card.get(k) for k in ('id', 'title', 'type', 'kind', 'useWhen')})
+            if len(related) >= limit:
+                break
+        return related
+
     async def memory_explain(self, memory_id: str) -> dict[str, Any]:
         """Full memory body + provenance receipt (why it exists / what cites it)."""
         rec = await self.get_memory(memory_id)
@@ -1904,6 +1932,7 @@ use_meaning
             'ok': True,
             'memory': rec,
             'card': memory_card(rec, snippet_chars=500),
+            'related': await self._related_cards(rec),
             'receipt': {
                 'memoryId': memory_id,
                 'status': rec.get('status'),
