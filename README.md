@@ -92,6 +92,13 @@ After adding the commands, review and trust them with `/hooks` in Codex.
 To turn automatic saving off, remove the Braintwin prompt hook from that tool's
 settings. Remove the session-start hook too if you want to stop loading memories.
 
+## Check your setup
+
+In a connected client, ask Braintwin to save a lasting preference. In a second client using
+the same database, ask it to recall the preference and return its memory ID. For hosted
+Braintwin, the [dashboard Connect page](https://braintwin.dev/app/#connect) provides a
+client-specific snippet, a store check and separate prompts for verifying a save and recall.
+
 ## Where your memory lives
 
 `~/.local/share/braintwin/brain.sqlite`, readable only by you. Set `BRAINTWIN_SQLITE` to use a

@@ -20,6 +20,8 @@ from typing import Any
 
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from .constants import CONNECTION_PATH, READINESS_HEADER
+
 KEY_AUTO = 'config.auto'
 RECHECK_S = 600.0  # look for chores at most this often
 FOLLOW_EVERY = timedelta(hours=24)
@@ -123,7 +125,7 @@ class Autopilot:
 
 
 class AutopilotMiddleware:
-    """Nudges the autopilot after each HTTP request; adds nothing to the request itself."""
+    """Nudge the autopilot after normal HTTP requests, excluding connection and readiness checks."""
 
     def __init__(self, app: ASGIApp, autopilot: Autopilot) -> None:
         self.app = app
@@ -133,5 +135,9 @@ class AutopilotMiddleware:
         try:
             await self.app(scope, receive, send)
         finally:
-            if scope.get('type') == 'http':
+            if (
+                scope.get('type') == 'http'
+                and scope.get('path') != CONNECTION_PATH
+                and READINESS_HEADER not in dict(scope.get('headers', []))
+            ):
                 self.autopilot.nudge()

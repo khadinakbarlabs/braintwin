@@ -20,12 +20,13 @@ import asyncio
 import json
 import logging
 import os
+import re
 import secrets
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
+from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response, StreamingResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .brand import env_value
@@ -36,6 +37,8 @@ from . import builtin_ai
 from .autopilot import auto_status, set_follow_daily
 from .settings import on_platform as on_platform  # noqa: PLC0414
 from .capture import extract_candidates
+from .constants import READINESS_HEADER, VERSION
+from .exact_recall import by_phrase
 from .move import backup_json
 from .dashboard_page import render_page
 from .follow import follow_add, follow_list, follow_memory_ids, follow_remove, follow_sync, follow_update
@@ -110,14 +113,19 @@ class DashboardMiddleware:
         self.enabled = dashboard_enabled()
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope.get('type') != 'http' or not self.enabled:
+        if scope.get('type') != 'http':
             await self.app(scope, receive, send)
             return
         path = scope.get('path', '')
         method = scope.get('method', 'GET')
+        if path == '/' and method == 'GET' and READINESS_HEADER in dict(scope.get('headers', [])):
+            await PlainTextResponse('Ready')(scope, receive, send)
+            return
+        if not self.enabled:
+            await self.app(scope, receive, send)
+            return
         is_page = path in PAGE_PATHS and method == 'GET'
         is_api = path.startswith('/api/')
-        # The platform's readiness probe also does GET /: answer 200 (the page) so Standby comes up.
         if not (is_page or is_api):
             await self.app(scope, receive, send)
             return
@@ -206,6 +214,17 @@ class DashboardMiddleware:
         brain = await self.get_brain()
         q = request.query_params
         if method == 'GET':
+            if name == 'connection':
+                probe = q.get('probe')
+                if probe is not None and not re.fullmatch(r'BT-[0-9A-F]{12}', probe):
+                    return _err(400, 'INVALID_PROBE', 'Use the setup code shown on the Connect page.')
+                mode = (await brain.get_policy()).get('mode')
+                result = {'ok': True, 'version': VERSION, 'backend': brain.backend_name, 'savingMode': mode}
+                if probe is not None:
+                    match = await by_phrase(brain, probe, None, 1, '')
+                    result['found'] = match['count'] > 0
+                    result['incomplete'] = not result['found'] and bool(match.get('nextAfter'))
+                return JSONResponse(result, headers={'Cache-Control': 'no-store'})
             if name == 'overview':
                 health = await brain.brain_health(include_sources=True)
                 inbox = await brain.inbox_list()  # one after the other: both take the same lock

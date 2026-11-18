@@ -41,13 +41,14 @@ nav.rail button:focus-visible,.btn:focus-visible,input:focus-visible,select:focu
 .count[hidden]{display:none}
 .seg{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:18px}
 .seg button{background:none;border:1px solid var(--line);border-radius:99px;padding:6px 13px;cursor:pointer;color:var(--mute);font-weight:550}
-.seg button[aria-current=true]{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+.seg button[aria-current=true],.seg button[aria-pressed=true]{background:var(--ink);color:var(--bg);border-color:var(--ink)}
 h2{font-size:1.05rem;font-weight:650;margin:0 0 6px;letter-spacing:-.01em}
 .hero{padding-top:14px}
 .hero h2{font:650 clamp(1.8rem,1.2rem + 2.4vw,2.6rem)/1.08 var(--serif);letter-spacing:-.045em;margin:10px 0 10px;text-wrap:balance}
 .hero p{color:var(--mute);margin:0 0 22px;max-width:56ch;font-size:15.5px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:20px;box-shadow:var(--shadow);margin-bottom:14px}
 .card>:last-child{margin-bottom:0}
+.connect .card>h3,.connect .card>div>h3{font-size:1rem;margin:0 0 10px}
 details.card>summary{cursor:pointer;font-weight:650;list-style:none;display:flex;justify-content:space-between;align-items:center;gap:10px}
 details.card>summary::-webkit-details-marker{display:none}
 details.card>summary::after{content:'+';color:var(--mute);font-weight:400;font-size:20px;line-height:1}
@@ -96,9 +97,6 @@ ul.steps li.item.done h3::before{content:none}
 ul.steps li.item.done h3{color:var(--mute);font-weight:550}
 .cardhead{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}
 .cardhead h2{margin:0}
-.prog{display:flex;align-items:center;gap:8px;color:var(--mute);font-size:12.5px;font-weight:600}
-.prog i{width:22px;height:5px;border-radius:99px;background:var(--line)}
-.prog i.on{background:var(--acc)}
 .meta{display:flex;gap:8px;flex-wrap:wrap;align-items:center;font-size:12.5px;color:var(--mute)}
 .tag{border:0;border-radius:99px;padding:1px 9px;cursor:pointer;background:var(--soft);color:var(--mute)}
 .tag:hover{color:var(--acc)}
@@ -144,7 +142,7 @@ a.btn{text-decoration:none;display:inline-block}
 #main.enter>details{animation-delay:.1s}
 .row-top{margin-top:12px}
 /*__SOURCES_CSS__*/
-@media (max-width:640px){.shell{padding:0 14px 70px}header.top{gap:10px}nav.rail{width:100%;order:3;justify-content:space-between}nav.rail button{padding:7px 9px;font-size:14px}.stat{min-width:90px}.card{padding:16px}}
+@media (max-width:640px){.shell{padding:0 14px 70px}header.top{gap:10px}nav.rail{width:100%;order:3;justify-content:space-between}nav.rail button{padding:8px 5px;font-size:13px;gap:3px}.stat{min-width:90px}.card{padding:16px}}
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{transition:none!important;animation:none!important}}
 </style>
 </head>
@@ -175,10 +173,9 @@ var TOKEN=HOSTED?'':(QS.get('token')||''),KEY='';
 function store(k,v){try{if(v==null)sessionStorage.removeItem(k);else sessionStorage.setItem(k,v);}catch(e){}}
 function stored(k){try{return sessionStorage.getItem(k)||'';}catch(e){return'';}}
 if(TOKEN)store('sb.t',TOKEN);else TOKEN=stored('sb.t');
-if(location.search){try{history.replaceState(null,'',location.pathname);}catch(e){}}
+if(location.search){try{history.replaceState(null,'',location.pathname+location.hash);}catch(e){}}
 var main=document.getElementById('main'),toastEl=document.getElementById('toast');
-var state={tab:'start',q:'',status:'approved',sort:'newest',tag:'',from:'',tool:'ChatGPT',overview:null,sel:new Set()};
-function flag(k,set){try{if(set)localStorage.setItem(k,'1');return !!localStorage.getItem(k);}catch(e){return false;}}
+var state={tab:location.hash==='#connect'?'connect':'start',q:'',status:'approved',sort:'newest',tag:'',from:'',tool:'ChatGPT',overview:null,verified:false,sel:new Set()};
 
 function h(tag,props){
   var el=document.createElement(tag);
@@ -203,10 +200,11 @@ function api(path,opts){
     if(HOSTED){var b={};Object.keys(opts.body).forEach(function(k){b[k]=opts.body[k]});b._dash=1;if(KEY)b._key=KEY;init.body=JSON.stringify(b);}
     else{init.headers['X-Dashboard']='1';if(KEY)init.headers['X-Dashboard-Key']=KEY;init.body=JSON.stringify(opts.body);}}
   return fetch(BASE+'/api/'+path,init).then(function(r){
-    if(HOSTED&&r.status===401&&!opts.retried){return renew().then(function(ok){if(ok){opts.retried=true;return api(path,opts);}signedOut('Please sign in again.');return{ok:false,message:'Signed out'};});}
+    if(HOSTED&&r.status===401&&!opts.retried){return renew().then(function(ok){if(ok){if(opts.body)return{ok:false,message:'Signed in again. Submit the change when you are ready.'};opts.retried=true;return api(path,opts);}signedOut('Please sign in again.');return{ok:false,message:'Signed out'};});}
     return r.json().catch(function(){return{ok:false,message:'Bad reply'}});},function(err){
     // Apify's gateway answers an expired token with a 401 that has no CORS headers,
     // so the browser reports a network error instead. Try one refresh, then retry.
+    if(opts.body)return{ok:false,message:'Could not confirm the change. Refresh and check your memory before trying again.'};
     if(HOSTED&&!opts.retried&&stored('sb.r')){return renew().then(function(ok){if(ok){opts.retried=true;return api(path,opts);}signedOut('Please sign in again.');return{ok:false,message:'Signed out'};});}
     return{ok:false,message:'Could not reach your memory. Check your connection and try again.'};}).then(function(r){
     return r;
@@ -296,7 +294,7 @@ function refreshOverview(){
     if(!o.ok)return;state.overview=o;
     var hl=o.health||{},by=hl.byStatus||{};
     var ci=document.getElementById('c-inbox');ci.textContent=o.inboxCount||0;ci.hidden=!((o.inboxCount||0)>0);
-    document.getElementById('sub').textContent='Stored in your own Apify account · version '+(hl.version||'');if(HOSTED)signOutLink();
+    document.getElementById('sub').textContent=storeLabel(hl.backend)+' · version '+(hl.version||'');if(HOSTED)signOutLink();
   });
 }
 
@@ -304,7 +302,7 @@ function viewStart(){
   var box=h('div');main.textContent='';main.appendChild(box);
   var o=state.overview||{},by=((o.health||{}).byStatus)||{},saved=by.approved||0,waiting=o.inboxCount||0;
   var hero=h('div',{class:'hero'},h('h2',{text:saved?'What do you want to find?':'One memory for all your AI tools'}),
-    h('p',{text:saved?'Search everything your AI tools remember about you, or add something new.':'Tell one AI tool something once and every other tool knows it. Three small steps and it runs by itself.'}));
+    h('p',{text:saved?'Search your saved memories or add something new.':'Save something worth remembering, then check that your AI tool can find it.'}));
   box.appendChild(hero);
   var si=h('input',{type:'search',placeholder:'Search your memories…','aria-label':'Search your memories'});
   var sf=h('form',{class:'search'},si,h('button',{class:'btn',type:'submit',text:'Search'}));
@@ -324,17 +322,9 @@ function viewStart(){
   [['Memories',saved,'memories'],['Waiting for you',waiting,'inbox'],['Following',o.sourcesFollowed||0,'follow']].forEach(function(x){
     stats.appendChild(h('button',{class:'stat',type:'button',onclick:function(){go(x[2])}},h('b',{text:String(x[1])}),h('span',{text:x[0]})))});
   box.appendChild(stats);
-  var steps=[[saved>0||flag('sb.c'),'Connect an AI tool','Pick your tool and follow a few short steps.','Connect a tool','connect'],
-    [saved>0,'Save a first memory','Say "remember that I prefer short answers" in your AI tool, or type it in the box above.',null,null],
-    [(o.sourcesFollowed||0)>0,'Add a source (optional)','Follow a YouTube channel, blog or newsletter. New items are then saved by themselves.','Add a source','follow']];
-  if(!steps.every(function(x){return x[0]})&&!flag('sb.h')){
-    var nd=steps.filter(function(x){return x[0]}).length;
-    var c=h('section',{class:'card'},h('div',{class:'cardhead'},h('h2',{text:'Get set up'}),h('span',{class:'prog'},steps.map(function(x){return h('i',{class:x[0]?'on':''})}),nd+' of '+steps.length+' done')));var ul=h('ul',{class:'list steps'});
-    steps.forEach(function(x){ul.appendChild(h('li',{class:'item'+(x[0]?' done':'')},h('h3',{text:x[1]}),x[0]?null:h('p',{text:x[2]}),(!x[0]&&x[3])?h('div',{class:'row'},h('button',{class:'btn ghost',type:'button',text:x[3],onclick:function(){go(x[4])}})):null))});
-    c.appendChild(ul);
-    if(steps[0][0]&&steps[1][0])c.appendChild(h('div',{class:'row row-top'},h('button',{class:'btn link',type:'button',text:'Hide this list',onclick:function(){flag('sb.h',true);render();}})));
-    box.appendChild(c);
-  }
+  if(!saved&&!state.verified)box.appendChild(h('section',{class:'card'},h('h2',{text:'Connect your first AI tool'}),
+    h('p',{class:'note',text:'Choose your client, check the signed-in store, and verify that a memory saved in the client appears here.'}),
+    h('div',{class:'row'},h('button',{class:'btn ghost',type:'button',text:'Connect a tool',onclick:function(){go('connect')}}))));
   var rec=(o.recentAutoApproved||[]).slice(-5).reverse();
   if(rec.length){
     var rc=h('section',{class:'card'},h('h2',{text:'Added lately'}),h('p',{class:'note',text:'Saved by itself from what you and your AI tools said.'}));var rl=h('ul',{class:'list'});
@@ -443,52 +433,103 @@ function copyText(text,btn){
   function fallback(){var ta=h('textarea',{});ta.value=text;document.body.appendChild(ta);ta.select();var ok=false;try{ok=document.execCommand('copy');}catch(e){}document.body.removeChild(ta);if(ok)done();else toast('Select the text and copy it by hand',true);}
   if(navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(text).then(done,fallback);else fallback();
 }
-function snip(out,title,note,text){
-  var btn=h('button',{class:'btn ghost',type:'button',text:'Copy'});btn.addEventListener('click',function(){copyText(text,btn);flag('sb.c',true);});
-  if(title)out.appendChild(h('h3',{text:title}));if(note)out.appendChild(h('p',{class:'note',text:note}));
-  out.appendChild(h('pre',{class:'snip',text:text}));out.appendChild(h('div',{class:'row row-top'},btn));
+function snip(out,title,note,text,label){
+  var btn=h('button',{class:'btn ghost',type:'button',text:label||'Copy'});
+  btn.addEventListener('click',function(){copyText(text,btn);});
+  if(title)out.appendChild(h('h3',{text:title}));
+  if(note)out.appendChild(h('p',{class:'note',text:note}));
+  out.appendChild(h('pre',{class:'snip',text:text}));
+  out.appendChild(h('div',{class:'row row-top'},btn));
 }
-var CHAT={'ChatGPT':'In ChatGPT, open Settings, then Connectors, and add a custom connector','Claude':'In Claude, open Settings, then Connectors, and choose Add custom connector','Other':'In your AI tool, find Connectors (or MCP servers) in the settings and add a new one'};
+function storeLabel(backend){
+  if(backend==='sqlite')return 'Local SQLite memory';
+  if(backend==='actor'||backend==='apify')return 'Memory in your Apify account';
+  return 'Braintwin memory';
+}
+var CLIENTS=['ChatGPT','Claude','Codex','Cursor','Claude Code','VS Code','Other'];
+function clientSetup(name,url){
+  var auth='Authorization: Bearer YOUR_APIFY_TOKEN';
+  var bridge='https://mcp.apify.com/?tools=khadinakbar/braintwin';
+  if(name==='ChatGPT'||name==='Claude')return [
+    'Add a custom MCP connector in '+name+' and enter this URL. Sign in with the same Apify account. The account must have access to the Braintwin Actor.',
+    bridge
+  ];
+  if(name==='Codex')return ['Add this to ~/.codex/config.toml. Set APIFY_TOKEN in the environment that launches Codex.',
+    '[mcp_servers.braintwin]\nurl = "'+url+'"\nbearer_token_env_var = "APIFY_TOKEN"'];
+  if(name==='Claude Code')return ['Set APIFY_TOKEN in your shell, then run this command.', 
+    'claude mcp add --transport http --header "Authorization: Bearer $APIFY_TOKEN" braintwin '+url];
+  if(name==='Cursor')return ['Add the server to your personal ~/.cursor/mcp.json. Enter your Apify token in the local configuration and keep the file private.',
+    JSON.stringify({mcpServers:{braintwin:{url:url,headers:{Authorization:'Bearer YOUR_APIFY_TOKEN'}}}},null,2)];
+  if(name==='VS Code')return ['Merge this into your VS Code MCP configuration. VS Code prompts for your token when it starts the server.',
+    JSON.stringify({inputs:[{id:'apify-token',type:'promptString',description:'Apify API token',password:true}],
+      servers:{braintwin:{type:'http',url:url,headers:{Authorization:'Bearer ${input:apify-token}'}}}},null,2)];
+  return ['Add a Streamable HTTP MCP server in a client that supports a Bearer token.',
+    url+'\n'+auth];
+}
 function viewConnect(){
-  var box=h('div');main.textContent='';main.appendChild(box);
-  var url=(BASE||location.origin)+'/mcp',withToken=false,easy='https://mcp.apify.com/?actors=khadinakbar/braintwin';
-  box.appendChild(h('div',{class:'hero'},h('h2',{text:'Which AI tool do you use?'}),h('p',{text:'Pick one and follow the steps. You can connect more later; every tool shares the same memory.'})));
-  var pick=h('div',{class:'seg',role:'group','aria-label':'AI tool'}),out=h('section',{class:'card'});box.appendChild(pick);box.appendChild(out);
-  var tick=h('input',{type:'checkbox'});
-  tick.addEventListener('change',function(){withToken=tick.checked;if(withToken&&!TOKEN)toast('No token in this tab. Open the page again with your token.',true);draw();});
-  function code(n,t,hdr){
-    return ({'Claude Code':[['','Run this once in your terminal.','claude mcp add --transport http braintwin '+url+' --header "'+hdr+'"']],
-      'Cursor':[['','Paste into the file ~/.cursor/mcp.json, then restart Cursor.',JSON.stringify({mcpServers:{'braintwin':{url:url,headers:{Authorization:'Bearer '+t}}}},null,2)]],
-      'VS Code':[['','Paste into the file .vscode/mcp.json in your project.',JSON.stringify({servers:{'braintwin':{type:'http',url:url,headers:{Authorization:'Bearer '+t}}}},null,2)]],
-      'Codex':[['','Add to the file ~/.codex/config.toml. Keep your token in an environment variable called APIFY_TOKEN. Codex asks you before each memory call; approve them when it asks.','[mcp_servers.braintwin]\nurl = "'+url+'"\nbearer_token_env_var = "APIFY_TOKEN"']],
-      'Other':[['Claude Desktop, with a token','Settings, Developer, Edit Config. Paste this, then restart. Needs Node.js installed.',JSON.stringify({mcpServers:{'braintwin':{command:'npx',args:['-y','mcp-remote',url,'--header',hdr]}}},null,2)],
-        ['A tool that cannot send a header','Add a custom connector with no authentication and paste this address. It contains your token, so never share it or show it on screen.',url+'?token='+t],
-        ['Any other tool','Use a remote (HTTP) MCP server with this address and this header.','Address: '+url+'\nHeader:  '+hdr]]})[n]||[];
-  }
-  function draw(){
-    pick.textContent='';
-    ['ChatGPT','Claude','Cursor','Claude Code','VS Code','Codex','Other'].forEach(function(n){
-      pick.appendChild(h('button',{type:'button','aria-current':String(state.tool===n),text:n,onclick:function(){state.tool=n;draw();}}))});
+  var box=h('div',{class:'connect'});main.textContent='';main.appendChild(box);
+  var url=(BASE||location.origin)+'/mcp';
+  box.appendChild(h('div',{class:'hero'},h('h2',{text:'Connect an AI tool'}),
+    h('p',{text:'Choose a client, then verify that it saves to the same memory you see here.'})));
+  var pick=h('div',{class:'seg',role:'group','aria-label':'AI client'}),out=h('section',{class:'card'});
+  CLIENTS.forEach(function(name){
+    var button=h('button',{type:'button',text:name,'aria-pressed':String(state.tool===name),onclick:function(){
+      state.tool=name;
+      Array.from(pick.children).forEach(function(el){el.setAttribute('aria-pressed',String(el===button));});
+      setup();
+    }});
+    pick.appendChild(button);
+  });
+  box.appendChild(pick);box.appendChild(out);
+  function setup(){
     out.textContent='';
-    var n=state.tool,t=withToken&&TOKEN?TOKEN:'YOUR_APIFY_TOKEN',list=code(n,t,'Authorization: Bearer '+t);
-    if(CHAT[n]){
-      out.appendChild(h('h2',{text:n==='Other'?'Connect another AI tool':'Connect '+n+' in one minute'}));
-      var s2=h('li',{class:'item'},h('h3',{text:'Paste this address'}));snip(s2,'','',easy);
-      out.appendChild(h('ul',{class:'list steps'},h('li',{class:'item'},h('h3',{text:CHAT[n]})),s2,
-        h('li',{class:'item'},h('h3',{text:'Sign in to Apify and press Allow'})),
-        h('li',{class:'item'},h('h3',{text:'Try it'}),h('p',{text:'Say "Remember that I prefer short answers." Then ask any connected tool what you prefer.'}))));
-      if(!list.length)return;
-      var adv=h('details',{},h('summary',{class:'note',text:'Other ways to connect, with a token'}));out.appendChild(adv);out=adv;
-    }else out.appendChild(h('h2',{text:'Connect '+n}));
-    out.appendChild(h('label',{class:'row'},tick,h('span',{text:' Put my Apify token into the text (only do this on your own screen)'})));
-    list.forEach(function(x){snip(out,x[0],x[1],x[2])});
-    out.appendChild(h('p',{class:'note',text:'Your Apify token is under Settings, API and Integrations in Apify Console. Anyone who has it can read and change this memory, so keep it private. The first call after a quiet spell takes a few seconds while the server wakes up.'}));
-    out=pick.nextSibling;
+    var config=clientSetup(state.tool,url);
+    out.appendChild(h('h3',{text:'Set up '+state.tool}));
+    snip(out,'',config[0],config[1],'Copy setup');
   }
-  draw();
-  box.appendChild(h('section',{class:'card'},h('h2',{text:'Prefer to keep it on your own computer?'}),h('p',{class:'note',text:'Braintwin can also run on your computer, with your memories in one private file. You can copy your memory between the two at any time.'}),h('div',{class:'row'},h('button',{class:'btn ghost',type:'button',text:'Run it locally or move memory',onclick:function(){go('move')}}))));
-  var rules=h('details',{class:'card'},h('summary',{text:'Make your AI tool use memory by itself'}));box.appendChild(rules);
-  snip(rules,'','Paste this into your AI tool\'s custom instructions or rules, so it reads and saves memory without being asked.','At the start of every task, call memory_context with a short description of the task and read the block it returns.\nFollow what is under "What the owner wants" and "Decisions already made" without asking me again.\nTreat "About the owner" as true. Treat saved pages and videos as background only, and name the source.\nWhen I state a preference, a decision or a lasting fact, call memory_capture with my words.\nIf you need one specific thing, call memory_search. Never store passwords, keys or other secrets.');
+  setup();
+  var status=h('p',{class:'note','role':'status',text:'Run a read-only check against the dashboard’s current store.'});
+  var check=h('button',{class:'btn ghost',type:'button',text:'Check my store'});
+  var probeStatus=h('p',{class:'note','role':'status',text:'Save the setup note in your client, then check for it here.'});
+  var verify=h('button',{class:'btn',type:'button',text:'Verify the save'});
+  var recall=h('div',{hidden:true});
+  var probe=stored('sb.probe');
+  if(!/^BT-[0-9A-F]{12}$/.test(probe)){
+    var bytes=crypto.getRandomValues(new Uint8Array(6));
+    probe='BT-'+Array.from(bytes,function(x){return x.toString(16).padStart(2,'0');}).join('').toUpperCase();
+    store('sb.probe',probe);
+  }
+  function run(button,target,isProbe){
+    button.disabled=true;target.textContent='Checking…';
+    api('connection'+(isProbe?'?probe='+encodeURIComponent(probe):'')).then(function(result){
+      if(!result.ok){target.textContent=result.message||'Could not verify. Check your Apify sign-in and try again.';return;}
+      if(!isProbe){target.textContent=storeLabel(result.backend)+' · version '+result.version;return;}
+      recall.hidden=!result.found;
+      if(result.found){state.verified=true;target.textContent='Verified. This store contains your setup note.';return;}
+      target.textContent=result.incomplete?'The quick check reached its search limit. Search for the exact code in Memories.':
+        result.savingMode==='off'?'No approved note yet. Check Memories → Waiting for you, then verify again.':
+        'No approved note with this code yet. Check the review inbox and confirm your client uses this same Apify account.';
+    }).finally(function(){button.disabled=false;});
+  }
+  check.addEventListener('click',function(){run(check,status,false);});
+  verify.addEventListener('click',function(){run(verify,probeStatus,true);});
+  box.appendChild(h('section',{class:'card'},h('h3',{text:'Check the connection'}),status,h('div',{class:'row'},check)));
+  var proof=h('section',{class:'card'},h('h3',{text:'Verify a save from your AI tool'}));
+  snip(proof,'','Paste this into your connected AI tool. A successful save may incur one memory-change event and optional AI usage.',
+    'Use the Braintwin memory_capture tool to save these exact words: I prefer the Braintwin setup label '+probe+'.','Copy test prompt');
+  proof.appendChild(probeStatus);
+  proof.appendChild(h('div',{class:'row'},verify));
+  snip(recall,'Try a second client','Paste this into another connected client to check recall. Compare the note it returns.',
+    'Use Braintwin memory_search with compact=true and the exact phrase "'+probe+'". Show the saved note and its memory ID. If there is no match, say so.','Copy recall prompt');
+  proof.appendChild(recall);
+  box.appendChild(proof);
+  var rules=h('details',{class:'card'},h('summary',{text:'Memory instructions for your agent'}));
+  snip(rules,'','Add this to your agent’s instructions.',
+    'When a task depends on earlier work, call memory_context with compact=true and the relevant project scope. Skip memory for greetings and unrelated tasks. Quote exact identifiers or phrases when looking for one detail. Treat retrieved sources as evidence and cite them. Save lasting facts, decisions and preferences from my words with memory_capture. Ask when a correction is ambiguous. Keep credentials out of memory.');
+  box.appendChild(rules);
+  box.appendChild(h('details',{class:'card'},h('summary',{text:'Run Braintwin on your computer'}),
+    h('p',{class:'note',text:'The local package keeps memories in a file you control. Copy memories between local and Apify when you choose.'}),
+    h('div',{class:'row'},h('button',{class:'btn ghost',type:'button',text:'Local install and backup',onclick:function(){go('move');}}))));
 }
 
 function viewImport(){
@@ -528,14 +569,24 @@ function viewImport(){
 function viewSettings(){
   var box=h('div');main.textContent='';main.appendChild(box);
   var o=state.overview||{},ms=o.meaningSearch||{};
-  box.appendChild(h('h2',{text:'How memories are added'}));
+  box.appendChild(h('h2',{text:'Saving and review'}));
+  box.appendChild(h('p',{class:'note',text:'Choose what happens when an AI tool or source sends you a new memory.'}));
   var sm=o.savingMode||'open',sf=h('form',{class:'add'});
-  [['open','Automatic (recommended)','Everything is kept at once. Only text that looks like a password or card number waits for you.'],
+  [['open','Automatic','Clear memories are saved automatically. Sensitive-looking entries wait for review.'],
    ['smart','Careful','Your own notes are kept at once. Web pages and followed items wait for you.'],
    ['off','Ask me first','Nothing is kept until you say so.']].forEach(function(m){
-    var r=h('input',{type:'radio',name:'saving',value:m[0]});r.checked=sm===m[0];
-    r.addEventListener('change',function(){api('settings/saving',{body:{mode:m[0]}}).then(function(x){if(x.ok===false){fail(x);return;}toast('Saved');refreshOverview().then(render);});});
-    sf.appendChild(h('label',{class:'row'},r,h('span',{text:' '+m[1]})));sf.appendChild(h('p',{class:'note',text:m[2]}));});
+    var r=h('input',{type:'radio',name:'saving',value:m[0],'aria-describedby':'saving-'+m[0]});r.checked=sm===m[0];
+    r.addEventListener('change',function(){
+      var controls=Array.from(sf.querySelectorAll('input[name=saving]'));
+      controls.forEach(function(input){input.disabled=true;});
+      api('settings/saving',{body:{mode:m[0]}}).then(function(x){
+        if(!x.ok){controls.forEach(function(input){input.checked=input.value===sm;});fail(x);return;}
+        sm=m[0];o.savingMode=sm;toast('Saving preference updated');
+      }).finally(function(){controls.forEach(function(input){input.disabled=false;});});
+    });
+    sf.appendChild(h('label',{class:'row'},r,h('span',{text:' '+m[1]})));
+    sf.appendChild(h('p',{class:'note',id:'saving-'+m[0],text:m[2]}));
+  });
   box.appendChild(sf);
   box.appendChild(h('h2',{text:'Advanced: smarter search'}));
   box.appendChild(h('p',{class:'note',text:ms.on?('On, model '+(ms.model||'')+'. Titles and summaries of your memories are sent to the service you chose, and that service bills you.'):'Off. Search already forgives typos and word forms. Turn this on to also find notes that share no words with your question, for example finding "oat milk flat white" when you ask "what do I drink in the morning". You need an account with an AI service; titles and summaries of your memories are sent to it and it bills you directly. Your key is saved in your own storage.'}));
@@ -613,6 +664,7 @@ function rnd(n){var a=new Uint8Array(n);crypto.getRandomValues(a);return b64u(a)
 function redirectUri(){return OA.redirectUri||(location.origin+location.pathname);}
 function signIn(){
   var verifier=rnd(48),st=rnd(16);store('sb.v',verifier);store('sb.s',st);
+  store('sb.view',state.tab==='connect'?'connect':null);
   crypto.subtle.digest('SHA-256',new TextEncoder().encode(verifier)).then(function(d){
     location.assign(OA.authorize+'?'+q({response_type:'code',client_id:OA.clientId,redirect_uri:redirectUri(),scope:OA.scope||'full_api_access',state:st,code_challenge:b64u(d),code_challenge_method:'S256'}));});
 }
@@ -623,7 +675,7 @@ function tokenCall(params){
 }
 function renew(){var r=stored('sb.r');if(!r)return Promise.resolve(false);return tokenCall({grant_type:'refresh_token',refresh_token:r});}
 function signedOut(msg){
-  TOKEN='';KEY='';['sb.t','sb.r','sb.k','sb.v','sb.s'].forEach(function(k){store(k,null)});
+  TOKEN='';KEY='';state.overview=null;state.verified=false;['sb.t','sb.r','sb.k','sb.v','sb.s','sb.probe','sb.view'].forEach(function(k){store(k,null)});
   document.getElementById('subnav').textContent='';main.textContent='';document.body.classList.add('out');
   document.querySelectorAll('nav.rail button').forEach(function(b){b.setAttribute('aria-current','false')});
   var btn=h('button',{class:'btn acc',type:'button',text:'Sign in with Apify',onclick:signIn});
@@ -639,10 +691,12 @@ function signOutLink(){
   var f=document.getElementById('sub');if(!f||document.getElementById('so'))return;
   f.appendChild(document.createTextNode(' · '));f.appendChild(h('button',{class:'btn link',id:'so',type:'button',text:'Sign out',onclick:function(){signedOut('You are signed out.')}}));
 }
-function boot(){document.body.classList.remove('out');enter();refreshOverview().then(function(){render();if(HOSTED)signOutLink();});}
+function boot(){document.body.classList.remove('out');enter();refreshOverview().then(function(){if(HOSTED&&!TOKEN)return;render();if(HOSTED)signOutLink();});}
 if(!HOSTED){boot();}
 else if(QS.get('code')){
   var okState=QS.get('state')&&QS.get('state')===stored('sb.s'),ver=stored('sb.v');store('sb.v',null);store('sb.s',null);
+  if(stored('sb.view')==='connect')state.tab='connect';
+  store('sb.view',null);
   if(!okState||!ver){signedOut('Sign-in could not be finished. Please try again.');}
   else{main.appendChild(empty('Signing you in…'));tokenCall({grant_type:'authorization_code',code:QS.get('code'),redirect_uri:redirectUri(),code_verifier:ver}).then(function(ok){if(ok)boot();else signedOut('Sign-in could not be finished. Please try again.');});}
 }

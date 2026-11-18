@@ -1,6 +1,9 @@
 """Fixed store names, key prefixes and tunables for the personal Braintwin store."""
 
-VERSION = '0.30.0'
+VERSION = '0.31.0'
+
+CONNECTION_PATH = '/api/connection'
+READINESS_HEADER = b'x-apify-container-server-readiness-probe'
 
 KV_STORE_NAME = 'braintwin-kv'
 AUDIT_DATASET_NAME = 'braintwin-audit'
