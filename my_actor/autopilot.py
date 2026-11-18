@@ -107,7 +107,7 @@ class Autopilot:
             if still_on:
                 # No overall timeout: cutting the check off half-way would keep what it saved but skip
                 # the charge. Each feed fetch has its own time limit, and this runs in the background.
-                res = await follow_sync(brain, ingest.fetch_text, limit=ITEMS_PER_FEED)
+                res = await follow_sync(brain, ingest.fetch_text, limit=ITEMS_PER_FEED, legacy_only=True, now=now)
                 saved = sum(int(f.get('saved') or 0) for f in res.get('feeds') or [])
                 from .notion import notion_status, notion_sync
 

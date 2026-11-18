@@ -3,7 +3,7 @@
 The owner follows YouTube channels, blogs and newsletters. New items arrive as memories
 tagged `followed`, so an agent can answer "what did I read/watch lately?" and search it.
 
-Consent model: following a source is the owner's decision (CLI only, never an MCP tool).
+Consent model: following a source is the owner's decision (dashboard or CLI, never an MCP tool).
 `auto_approve` is set per source at follow time; otherwise items land in the inbox as
 proposals like any other memory. Feeds are fetched directly over HTTP (public RSS/Atom,
 YouTube's public channel feed) — no third-party Actors. Transcripts are an optional PAID
@@ -15,16 +15,17 @@ from __future__ import annotations
 import hashlib
 import re
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from .brain import allow_reserved
+from .brain import allow_reserved, scope_tag_for
 from .feeds import YOUTUBE_FEED, channel_id_from_page, parse_feed, youtube_channel_id
 
 KEY_FOLLOWS = 'config.follows'
 MAX_FOLLOWS = 200
 MAX_SEEN = 500
 FIRST_SYNC_LIMIT = 20
+CADENCES = {'hourly': timedelta(hours=1), 'daily': timedelta(days=1), 'weekly': timedelta(days=7)}
 TRANSCRIPT_ACTOR = 'khadinakbar/youtube-ai-transcript-extractor'
 
 FetchText = Callable[[str], Awaitable[dict[str, Any]]]
@@ -51,16 +52,50 @@ async def _store(brain: Any, follows: list[dict[str, Any]]) -> None:
     await brain.kv.set_value(KEY_FOLLOWS, {'follows': follows, 'updatedAt': _now()})
 
 
+def _check_time(value: Any) -> datetime | None:
+    if not isinstance(value, str) or len(value) > 40:
+        return None
+    try:
+        dt = datetime.fromisoformat(value)
+        return dt.astimezone(UTC) if dt.tzinfo is not None else None
+    except (ValueError, OverflowError):
+        return None
+
+
+def normalize_schedule(raw: Any) -> dict[str, Any]:
+    cadence = raw.get('cadence') if isinstance(raw, dict) else None
+    if cadence in ('inherit', 'manual'):
+        return {'cadence': cadence}
+    if not isinstance(cadence, str) or cadence not in CADENCES:
+        raise ValueError('Choose manual, hourly, daily or weekly.')
+    starts = raw.get('startsAt')
+    first = datetime.now(UTC) if starts in (None, '') else _check_time(starts)
+    if first is None or not 2000 <= first.year <= 2100:
+        raise ValueError('Choose a valid first check date and time.')
+    return {'cadence': cadence, 'startsAt': first.isoformat()}
+
+
+def _next_check(follow: dict[str, Any]) -> datetime | None:
+    schedule = follow.get('schedule') or {}
+    interval = CADENCES.get(schedule.get('cadence'))
+    start = _check_time(schedule.get('startsAt'))
+    if interval is None or start is None:
+        return None
+    last = _check_time(follow.get('lastSyncAt'))
+    if last is None or last < start:
+        return start
+    return start + ((last - start) // interval + 1) * interval
+
+
 async def follow_list(brain: Any) -> dict[str, Any]:
-    follows = await _load(brain)
-    return {
-        'ok': True,
-        'count': len(follows),
-        'follows': [
-            {k: f.get(k) for k in ('id', 'kind', 'title', 'feedUrl', 'autoApprove', 'lastSyncAt', 'lastError', 'itemsSeen')}
-            for f in follows
-        ],
-    }
+    follows = []
+    for row in await _load(brain):
+        f = {k: row.get(k) for k in ('id', 'kind', 'title', 'feedUrl', 'scope', 'schedule',
+                                    'autoApprove', 'lastSyncAt', 'lastError', 'itemsSeen', 'lastCheck')}
+        next_check = _next_check(row)
+        f['nextCheckAt'] = next_check.isoformat() if next_check else None
+        follows.append(f)
+    return {'ok': True, 'count': len(follows), 'follows': follows}
 
 
 async def _resolve_feed(target: str, fetch_text: FetchText) -> tuple[str | None, str, dict[str, Any] | None]:
@@ -93,7 +128,8 @@ async def _resolve_feed(target: str, fetch_text: FetchText) -> tuple[str | None,
 
 
 async def follow_add(
-    brain: Any, target: str, fetch_text: FetchText, *, title: str | None = None, auto_approve: bool = False
+    brain: Any, target: str, fetch_text: FetchText, *, title: str | None = None,
+    auto_approve: bool = False, scope: str | None = None, schedule: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     feed_url, kind, error = await _resolve_feed(target, fetch_text)
     if error or not feed_url:
@@ -116,6 +152,8 @@ async def follow_add(
             'title': (title or parsed.get('title') or feed_url)[:200],
             'feedUrl': feed_url,
             'autoApprove': bool(auto_approve),
+            'scope': (scope_tag_for(scope) or '')[6:],
+            'schedule': normalize_schedule(schedule) if schedule is not None else None,
             'createdAt': _now(),
             'lastSyncAt': None,
             'lastError': None,
@@ -130,7 +168,7 @@ async def follow_add(
 
 
 async def follow_remove(brain: Any, follow_id: str) -> dict[str, Any]:
-    async with brain._sources_lock:
+    async with brain._follow_sync_lock, brain._sources_lock:
         follows = await _load(brain)
         kept = [f for f in follows if f['id'] != follow_id]
         if len(kept) == len(follows):
@@ -141,7 +179,8 @@ async def follow_remove(brain: Any, follow_id: str) -> dict[str, Any]:
 
 
 async def follow_update(
-    brain: Any, follow_id: str, *, auto_approve: bool | None = None, title: str | None = None
+    brain: Any, follow_id: str, *, auto_approve: bool | None = None, title: str | None = None,
+    scope: str | None = None, schedule: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Change one source's settings. Free: nothing is remembered or forgotten here."""
     changes: dict[str, Any] = {}
@@ -149,13 +188,16 @@ async def follow_update(
         changes['autoApprove'] = bool(auto_approve)
     if title is not None and title.strip():
         changes['title'] = title.strip()[:200]
+    if scope is not None:
+        changes['scope'] = (scope_tag_for(scope) or '')[6:]
+    if schedule is not None:
+        changes['schedule'] = normalize_schedule(schedule)
     if not changes:
         return {'ok': False, 'error': 'INVALID_INPUT', 'message': 'Nothing to change.'}
-    if not any(f['id'] == follow_id for f in await _load(brain)):
+    follow = await _merge_follow(brain, follow_id, changes)
+    if follow is None:
         return {'ok': False, 'error': 'NOT_FOUND', 'message': f'No follow with id {follow_id}'}
-    await _merge_follow(brain, follow_id, changes)
     await brain.audit('follow', detail=f'update:{follow_id}:{sorted(changes)}'[:300])
-    follow = next((f for f in await _load(brain) if f['id'] == follow_id), {})
     return {'ok': True, 'follow': {k: v for k, v in follow.items() if k not in ('seen', 'recentVideos')}}
 
 
@@ -182,11 +224,12 @@ def _item_memory(follow: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]
         lines += ['', item['summary']]
     lines += ['', f"Source: {item['url']}"]
     key = hashlib.sha256(f"{follow['id']}|{item['id']}".encode()).hexdigest()[:24]
+    scope_tag = scope_tag_for(follow.get('scope'))
     return {
         'title': item['title'],
         'content': '\n'.join(lines),
         'memory_type': 'followed',
-        'tags': ['followed', f"follow:{follow['id']}", follow['kind']],
+        'tags': ['followed', f"follow:{follow['id']}", follow['kind'], *([scope_tag] if scope_tag else [])],
         'citations': [{'url': item['url']}],
         'confidence': 0.6,
         'dedupe_key': f'follow:{key}',
@@ -200,17 +243,20 @@ def _item_memory(follow: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]
     }
 
 
-async def _merge_follow(brain: Any, follow_id: str, changes: dict[str, Any]) -> None:
-    """Write only the fields a sync changed into the freshly loaded record (adds are never lost)."""
+async def _merge_follow(brain: Any, follow_id: str, changes: dict[str, Any]) -> dict[str, Any] | None:
+    """Write only changed fields into the freshly loaded record."""
     async with brain._sources_lock:
         follows = await _load(brain)
         for f in follows:
             if f['id'] == follow_id:
                 f.update(changes)
-        await _store(brain, follows)
+                await _store(brain, follows)
+                return f
+    return None
 
 
-async def _sync_one(brain: Any, fetch_text: FetchText, follow: dict[str, Any], limit: int, dry_run: bool) -> dict[str, Any]:
+async def _sync_one(brain: Any, fetch_text: FetchText, follow: dict[str, Any], limit: int, dry_run: bool,
+                    checked_at: str) -> dict[str, Any]:
     fetched = await fetch_text(follow['feedUrl'])
     parsed = parse_feed(fetched.get('text') or '') if fetched.get('ok') else {
         'ok': False, 'error': fetched.get('error'), 'message': fetched.get('message'),
@@ -218,14 +264,14 @@ async def _sync_one(brain: Any, fetch_text: FetchText, follow: dict[str, Any], l
     if not parsed.get('ok'):
         err = f"{parsed.get('error')}: {parsed.get('message')}"[:300]
         if not dry_run:
-            await _merge_follow(brain, follow['id'], {'lastError': err, 'lastSyncAt': _now()})
+            await _merge_follow(brain, follow['id'], {'lastError': err, 'lastSyncAt': checked_at, 'lastCheck': None})
         return {'id': follow['id'], 'ok': False, 'error': err}
     seen = set(follow.get('seen') or [])
     fresh = [i for i in parsed['items'] if i['id'] not in seen][:limit]
     saved = 0
     done_ids: list[str] = []
     if not dry_run and fresh:
-        approve_all = bool(follow.get('autoApprove')) or await brain.open_mode()
+        approve_all = bool(follow.get('autoApprove'))
         token = allow_reserved.set(True)
         await brain.begin_batch()
         try:
@@ -248,7 +294,8 @@ async def _sync_one(brain: Any, fetch_text: FetchText, follow: dict[str, Any], l
                 'itemsSeen': int(follow.get('itemsSeen') or 0) + len(done_ids),
                 'recentVideos': (vids + list(follow.get('recentVideos') or []))[:20],
                 'lastError': None,
-                'lastSyncAt': _now(),
+                'lastSyncAt': checked_at,
+                'lastCheck': {'found': len(fresh), 'saved': saved},
             },
         )
     return {'id': follow['id'], 'ok': True, 'title': follow['title'], 'newItems': len(fresh), 'saved': saved, 'dryRun': dry_run}
@@ -261,24 +308,37 @@ async def follow_sync(
     follow_id: str | None = None,
     limit: int = FIRST_SYNC_LIMIT,
     dry_run: bool = False,
+    due_only: bool = False,
+    legacy_only: bool = False,
+    now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Pull new items from every followed feed (or one). A broken feed never stops the others."""
-    follows = await _load(brain)
-    chosen = [f for f in follows if follow_id in (None, f['id'])]
-    if follow_id and not chosen:
-        return {'ok': False, 'error': 'NOT_FOUND', 'message': f'No follow with id {follow_id}'}
+    """Check all, a single feed, or just the feeds opted into the selected schedule."""
     limit = max(1, min(int(limit), 50))
     report: list[dict[str, Any]] = []
-    for follow in chosen:
-        try:
-            report.append(await _sync_one(brain, fetch_text, follow, limit, dry_run))
-        except Exception as exc:  # noqa: BLE001 - one hostile/broken feed must not stop the rest
-            err = f'{type(exc).__name__}: {exc}'[:300]
-            report.append({'id': follow['id'], 'ok': False, 'error': err})
-            if not dry_run:
-                await _merge_follow(brain, follow['id'], {'lastError': err, 'lastSyncAt': _now()})
-    await brain.audit('follow', detail=f"sync:{len(chosen)} feeds"[:300])
-    return {'ok': all(r['ok'] for r in report) if report else True, 'feeds': report}
+    async with brain._follow_sync_lock:
+        now = now or datetime.now(UTC)
+        checked_at = now.isoformat()
+        follows = await _load(brain)
+        chosen = [f for f in follows if follow_id in (None, f['id'])]
+        if follow_id and not chosen:
+            return {'ok': False, 'error': 'NOT_FOUND', 'message': f'No follow with id {follow_id}'}
+        for follow in chosen:
+            if due_only:
+                next_check = _next_check(follow)
+                if next_check is None or next_check > now:
+                    continue
+            elif legacy_only and (follow.get('schedule') or {}).get('cadence') not in (None, 'inherit'):
+                continue
+            try:
+                report.append(await _sync_one(brain, fetch_text, follow, limit, dry_run, checked_at))
+            except Exception as exc:  # noqa: BLE001 - one broken feed must not stop the others
+                err = type(exc).__name__ + ': Could not complete this check.'
+                report.append({'id': follow['id'], 'ok': False, 'error': err})
+                if not dry_run:
+                    await _merge_follow(brain, follow['id'], {'lastError': err, 'lastSyncAt': checked_at, 'lastCheck': None})
+    if report:
+        await brain.audit('follow', detail=f"sync:{len(report)} feeds")
+    return {'ok': all(r['ok'] for r in report), 'feeds': report}
 
 
 async def queue_transcripts(brain: Any, follow_id: str, *, max_cost_usd: float, max_videos: int = 5) -> dict[str, Any]:

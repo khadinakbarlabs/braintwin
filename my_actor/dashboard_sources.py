@@ -8,11 +8,6 @@ Like the rest of the page, every piece of stored text is written with `textConte
 from __future__ import annotations
 
 SOURCES_CSS = r"""
-ol.flow{list-style:none;margin:0 0 18px;padding:0;display:grid;grid-template-columns:repeat(4,1fr);gap:0;counter-reset:f;border:1px solid var(--line);border-radius:var(--r);background:var(--card);overflow:hidden}
-ol.flow li{counter-increment:f;padding:14px 16px 15px;position:relative;font-size:14px;color:var(--mute);border-left:1px solid var(--line)}
-ol.flow li:first-child{border-left:0}
-ol.flow li::before{content:'0' counter(f);display:block;font:400 1.35rem/1 var(--serif);color:var(--acc);margin-bottom:6px;letter-spacing:-.02em}
-ol.flow li b{display:block;color:var(--ink);font-weight:650;font-size:15px}
 .kinds{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:14px}
 .kinds button{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:11px 12px;text-align:left;cursor:pointer;display:grid;gap:2px;transition:border-color .15s,box-shadow .15s}
 .kinds button b{font-weight:650;font-size:14.5px}
@@ -24,6 +19,20 @@ fieldset.choice{border:0;margin:0 0 4px;padding:0;display:grid;gap:8px}
 fieldset.choice legend{font-weight:650;padding:0;margin-bottom:8px}
 li.src{gap:9px;padding:16px 18px}
 li.src.open{border-color:var(--acc)}
+li.src h3{overflow-wrap:anywhere}
+.source-meta{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(155px,100%),1fr));gap:8px;margin:0}
+.source-meta div{background:var(--soft);border-radius:8px;padding:8px 11px;min-width:0}
+.source-meta dt{font-size:.8rem;color:var(--mute)}
+.source-meta dd{margin:2px 0 0;overflow-wrap:anywhere}
+.source-settings{border-top:1px solid var(--line);padding-top:10px}
+.source-settings summary{cursor:pointer;font-weight:650;min-height:32px}
+.source-settings form{margin-top:10px}
+.source-options{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.source-options label{min-width:0}
+.source-options label[hidden]{display:none}
+.source-options input,.source-options select{width:100%;min-width:0}
+.schedule-example{background:var(--soft);padding:9px 12px;border-radius:8px;overflow:auto;max-width:100%}
+@media(max-width:500px){.source-options{grid-template-columns:minmax(0,1fr)}li.src{padding:14px}}
 .tally{display:flex;gap:8px;flex-wrap:wrap}
 .tally span{background:var(--soft);border-radius:10px;padding:6px 11px;font-size:13px;color:var(--mute)}
 .tally span b{color:var(--ink);font:400 1.05rem/1 var(--serif);margin-right:5px}
@@ -38,7 +47,7 @@ li.src.open{border-color:var(--acc)}
 .duo{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px}
 .duo .card{margin:0}
 .way{font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--acc)}
-@media (max-width:640px){ol.flow{grid-template-columns:1fr 1fr}ol.flow li:nth-child(3){border-left:0}ol.flow li:nth-child(n+3){border-top:1px solid var(--line)}.kinds{grid-template-columns:1fr 1fr}.duo{grid-template-columns:1fr}}
+@media (max-width:640px){.kinds{grid-template-columns:1fr 1fr}.duo{grid-template-columns:1fr}}
 """
 
 SOURCES_JS = r"""
@@ -48,26 +57,32 @@ var SRC_KINDS=[
   ['feed','Newsletter or feed','Every new issue','Paste the newsletter or feed link','Link to the newsletter or its feed'],
   ['once','One page or video','Saved once, not followed','','']];
 var SRC_PAGE=50;
+var SCHEDULE_NAMES={inherit:'Use workspace setting',manual:'Manual',hourly:'Hourly',daily:'Daily',weekly:'Weekly'};
+function fullCheckTime(value){
+  if(!value)return '';
+  var date=new Date(value);
+  return isNaN(date)?'':date.toLocaleString(undefined,{weekday:'short',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});
+}
+function localInputTime(value){
+  if(!value)return '';
+  var date=new Date(value);
+  return isNaN(date)?'':new Date(date.getTime()-date.getTimezoneOffset()*60000).toISOString().slice(0,16);
+}
 function srcLabel(fw){return fw.kind==='youtube'?'YouTube':'Blog or newsletter';}
 function plural(n,w){return n+' '+w+(n===1?'':'s');}
 function viewFollow(){
   var box=h('div');main.style.minHeight=main.offsetHeight+'px';main.textContent='';main.appendChild(box);
   function settle(){main.style.minHeight='';}
   if(!state.srcKind)state.srcKind='youtube';
-  box.appendChild(h('div',{class:'hero'},h('h2',{text:'Sources that keep your memory fresh'}),
-    h('p',{text:'Follow the channels, blogs and newsletters you learn from. Braintwin reads what is new and saves a short note, so your AI tools know what you read and watch.'})));
-  box.appendChild(h('ol',{class:'flow'},
-    h('li',{},h('b',{text:'You add a source'}),'A channel, blog or newsletter'),
-    h('li',{},h('b',{text:'It gets checked'}),'Once a day, or when you ask'),
-    h('li',{},h('b',{text:'You decide'}),'Keep or decline each new item'),
-    h('li',{},h('b',{text:'Your AI knows it'}),'In every connected tool')));
-  var addBox=h('section',{class:'card'});box.appendChild(addBox);
+  box.appendChild(h('div',{class:'hero'},h('h2',{text:'Sources'}),
+    h('p',{text:'Follow YouTube channels, blogs and newsletters. Review what they bring in and choose when each source is checked.'})));
   var listBox=h('section',{class:'card'});box.appendChild(listBox);
-  var autoBox=h('section',{class:'card'});box.appendChild(autoBox);
-  var dBox=h('section',{class:'card'});box.appendChild(dBox);
+  var addBox=h('details',{class:'card'});box.appendChild(addBox);
+  var autoBox=h('details',{class:'card'});box.appendChild(autoBox);
+  var dBox=h('details',{class:'card'});box.appendChild(dBox);
 
   function drawAdd(){
-    addBox.textContent='';addBox.appendChild(h('h2',{text:'Add a source'}));
+    addBox.textContent='';addBox.appendChild(h('summary',{text:'Add a source'}));
     var kinds=h('div',{class:'kinds',role:'group','aria-label':'Kind of source'});
     SRC_KINDS.forEach(function(k){
       kinds.appendChild(h('button',{type:'button','aria-pressed':String(state.srcKind===k[0]),onclick:function(){state.srcKind=k[0];drawAdd();}},h('b',{text:k[1]}),h('span',{text:k[2]})));});
@@ -80,25 +95,41 @@ function viewFollow(){
     }
     var target=h('input',{required:true,maxlength:500,placeholder:kind[3],name:'target'});
     var ask=h('input',{type:'radio',name:'mode',value:'ask'}),keep=h('input',{type:'radio',name:'mode',value:'keep'});ask.checked=true;
+    var project=h('input',{maxlength:60,placeholder:'Across projects'});
     var busy=false;
-    var f=h('form',{class:'add'},h('label',{},kind[4],target),
+    var f=h('form',{class:'add'},h('label',{},kind[4],target),h('label',{},'Project',project),
       h('fieldset',{class:'choice'},h('legend',{text:'What should happen with new items?'}),
-        h('label',{class:'row'},ask,h('span',{text:' Ask me first. New items wait under the source until I keep or decline them.'})),
+        h('label',{class:'row'},ask,h('span',{text:' Send new items to review. I can keep or decline them whenever I have time.'})),
         h('label',{class:'row'},keep,h('span',{text:' Keep them without asking. Best for sources I fully trust.'}))),
-      h('div',{class:'row'},h('button',{class:'btn acc',type:'submit',text:'Add source'}),h('span',{class:'note',text:'Adding and checking are free. Each new item saved costs $0.01.'})));
+      h('div',{class:'row'},h('button',{class:'btn acc',type:'submit',text:'Add source'}),h('span',{class:'note',text:'Adding a source is free. A check that saves new items costs $0.01 per check, plus Apify platform usage.'})));
     f.addEventListener('submit',function(e){e.preventDefault();if(busy)return;busy=true;toast('Looking for the feed…');
-      api('follows/add',{body:{target:target.value,autoApprove:keep.checked}}).then(function(r){busy=false;
-        if(r.ok===false){fail(r);return;}toast(r.duplicate?'You already have this source':'Source added');refreshOverview().then(render);});});
+      api('follows/add',{body:{target:target.value,scope:project.value,autoApprove:keep.checked,schedule:{cadence:'manual'}}}).then(function(r){busy=false;
+        if(r.ok===false){fail(r);return;}
+        toast(r.duplicate?'You already have this source':'Source added');
+        state.srcSettings=r.follow.id;refreshOverview().then(render);});});
     addBox.appendChild(f);
   }
 
-  function drawAuto(a){autoBox.textContent='';autoBox.appendChild(h('h2',{text:'Checking for new items'}));var t=h('input',{type:'checkbox'});t.checked=!!(a&&a.followDaily);
-    t.addEventListener('change',function(){api('follows/auto',{body:{on:t.checked}}).then(function(r){if(r.ok===false){fail(r);t.checked=!t.checked;return;}toast(t.checked?'Daily check on':'Daily check off');});});
-    autoBox.appendChild(h('label',{class:'row'},t,h('span',{text:' Check all my sources by itself, once a day'})));
-    autoBox.appendChild(h('p',{class:'note',text:'Saving something new costs $0.01.'+(a&&a.lastFollowCheck?' Last automatic check: '+String(a.lastFollowCheck).slice(0,16).replace('T',' ')+' UTC.':'')}));}
+  function drawAuto(a){
+    autoBox.textContent='';
+    autoBox.appendChild(h('summary',{text:'Set up automatic checks on Apify'}));
+    autoBox.appendChild(h('p',{class:'note',text:'Create one recurring Apify Schedule for your Braintwin Actor with the input below. Run it hourly for hourly sources, or choose a slower frequency. Each run checks only sources whose next time has arrived. Apify charges platform usage for scheduled runs.'}));
+    autoBox.appendChild(h('pre',{class:'schedule-example'},h('code',{text:JSON.stringify({mode:'follow',dueOnly:true},null,2)})));
+    autoBox.appendChild(h('a',{href:'https://docs.apify.com/actors/running/schedules',target:'_blank',rel:'noopener noreferrer',text:'Apify schedule setup guide'}));
+    var t=h('input',{type:'checkbox'});t.checked=!!(a&&a.followDaily);
+    t.addEventListener('change',function(){
+      t.disabled=true;
+      api('follows/auto',{body:{on:t.checked}}).then(function(r){
+        t.disabled=false;if(r.ok===false){fail(r);t.checked=!t.checked;return;}
+        toast(t.checked?'Workspace daily check on':'Workspace daily check off');render();
+      });
+    });
+    autoBox.appendChild(h('p',{class:'note',text:'Existing sources using the workspace setting can also check once a day when Braintwin receives activity.'}));
+    autoBox.appendChild(h('label',{class:'row'},t,h('span',{text:'Enable workspace daily check'})));
+  }
 
   function drawDigest(d){dBox.textContent='';d=d||{};
-    dBox.appendChild(h('h2',{text:'Summary of what you learned'}));
+    dBox.appendChild(h('summary',{text:'Summary of what you learned'}));
     var cost=d.usesOwnKey?'Because you use your own AI key, a digest costs one memory change ($0.01).':(d.priceUsd?('Each digest costs $'+d.priceUsd+'.'):'');
     dBox.appendChild(h('p',{class:'note',text:d.possible?('Let an AI sum up what your followed videos, blogs and saved links taught you, written for you. '+cost+' Nothing new, no charge.'):'Turn on AI note-taking in Settings to use this.'}));
     if(!d.possible)return;
@@ -158,6 +189,44 @@ function viewFollow(){
     });
   }
 
+  function settings(fw){
+    var saved=fw.schedule||{cadence:'inherit'};
+    var cadence=h('select');
+    Object.keys(SCHEDULE_NAMES).forEach(function(key){
+      cadence.appendChild(h('option',{value:key,text:SCHEDULE_NAMES[key],selected:saved.cadence===key}));
+    });
+    var start=h('input',{type:'datetime-local',value:localInputTime(saved.startsAt)});
+    var startLabel=h('label',{},'First check (local time)',start);
+    var active=function(){return ['hourly','daily','weekly'].indexOf(cadence.value)>=0;};
+    startLabel.hidden=!active();
+    cadence.addEventListener('change',function(){startLabel.hidden=!active();});
+    var title=h('input',{value:fw.title||'',maxlength:200,required:true});
+    var project=h('input',{value:fw.scope||'',maxlength:60,placeholder:'Across projects'});
+    var keep=h('select',{},h('option',{value:'review',text:'Send to review',selected:!fw.autoApprove}),
+                           h('option',{value:'keep',text:'Keep automatically',selected:!!fw.autoApprove}));
+    var button=h('button',{class:'btn',type:'submit',text:'Save channel settings'});
+    var form=h('form',{class:'add'},h('div',{class:'source-options'},
+      h('label',{},'Display name',title),h('label',{},'Project for new items',project),
+      h('label',{},'New items',keep),h('label',{},'Check frequency',cadence),startLabel),
+      h('p',{class:'note',text:'Automatic times repeat from the first check. Leave it blank to make the source eligible now. An Apify Schedule runs each check after it becomes due.'}),
+      h('div',{class:'row'},button));
+    form.addEventListener('submit',function(e){
+      e.preventDefault();if(button.disabled)return;
+      var schedule={cadence:cadence.value};
+      if(active()&&start.value){
+        var first=new Date(start.value);
+        if(isNaN(first)){toast('Choose a valid first check time.',true);return;}
+        schedule.startsAt=start.value===localInputTime(saved.startsAt)?saved.startsAt:first.toISOString();
+      }
+      button.disabled=true;
+      api('follows/update',{body:{id:fw.id,title:title.value,scope:project.value,autoApprove:keep.value==='keep',schedule:schedule}}).then(function(r){
+        button.disabled=false;if(r.ok===false){fail(r);return;}
+        toast('Channel settings saved');state.srcSettings=fw.id;render();
+      });
+    });
+    return h('details',{class:'source-settings',open:state.srcSettings===fw.id},h('summary',{text:'Settings'}),form);
+  }
+
   function drawLeave(li,fw){
     var all=(fw.saved||0)+(fw.waiting||0);
     function gone(forget){return function(){api('follows/remove',{body:{id:fw.id,forget:forget}}).then(function(x){
@@ -177,11 +246,13 @@ function viewFollow(){
 
   drawAdd();
   return api('follows').then(function(r){
-    drawAuto(r&&r.auto);drawDigest(r&&r.digest);
-    var items=(r&&r.follows)||[],kept=0,waiting=0;
+    if(!r.ok){listBox.appendChild(empty(r.message||'Could not load your sources.'));settle();return;}
+    drawAuto(r.auto);drawDigest(r.digest);
+    var items=r.follows||[],kept=0,waiting=0;
+    addBox.open=!items.length;
     items.forEach(function(fw){kept+=fw.saved||0;waiting+=fw.waiting||0;});
     listBox.appendChild(h('h2',{text:'Your sources ('+items.length+')'}));
-    if(!items.length){listBox.appendChild(empty('No sources yet. Add your first one above.'));settle();return;}
+    if(!items.length){listBox.appendChild(empty('No sources yet. Add your first channel, blog or newsletter.'));settle();return;}
     var all=h('button',{class:'btn',type:'button',text:'Check all now',onclick:function(){check(null,all)}});
     listBox.appendChild(h('div',{class:'bar'},all,h('span',{class:'grow'}),
       h('div',{class:'tally'},h('span',{},h('b',{text:String(kept)}),'kept'),h('span',{class:waiting?'hot':''},h('b',{text:String(waiting)}),'waiting for you'))));
@@ -189,21 +260,26 @@ function viewFollow(){
     items.forEach(function(fw){
       var open=state.src===fw.id,w=fw.waiting||0;
       var one=h('button',{class:'btn ghost',type:'button',text:'Check now'});one.addEventListener('click',function(){check(fw.id,one)});
-      var sw=h('input',{type:'checkbox'});sw.checked=!!fw.autoApprove;
-      sw.addEventListener('change',function(){api('follows/update',{body:{id:fw.id,autoApprove:sw.checked}}).then(function(x){
-        if(x.ok===false){fail(x);sw.checked=!sw.checked;return;}toast(sw.checked?'New items are kept without asking':'New items will wait for you');render();});});
+      var cadence=(fw.schedule||{}).cadence||'inherit';
+      var next=fw.nextCheckAt?fullCheckTime(fw.nextCheckAt):(cadence==='inherit'&&r.auto.followDaily?'Workspace daily check':'On demand');
+      var last=fw.lastSyncAt?fullCheckTime(fw.lastSyncAt):'Never checked';
       var li=h('li',{class:'item src'+(open?' open':'')},
-        h('h3',{},h('span',{text:fw.title||fw.feedUrl||''}),h('span',{class:'pill',text:srcLabel(fw)}),
-          h('span',{class:'pill '+(fw.autoApprove?'approved':''),text:fw.autoApprove?'kept without asking':'asks you first'})),
-        h('div',{class:'tally'},h('span',{},h('b',{text:String(fw.saved||0)}),'kept'),h('span',{class:w?'hot':''},h('b',{text:String(w)}),'waiting'),
-          h('span',{text:fw.lastSyncAt?('checked '+when(fw.lastSyncAt)):'never checked'})),
-        fw.lastError?h('p',{class:'problem',text:'The last check could not read this source: '+fw.lastError}):null,
+        h('h3',{},h('span',{text:fw.title||fw.feedUrl||''}),h('span',{class:'pill',text:srcLabel(fw)})),
+        h('p',{class:'note',text:(fw.scope||'Across projects')+' · '+SCHEDULE_NAMES[cadence]+' · '+(fw.autoApprove?'Auto-keep':'Review new items')}),
+        h('dl',{class:'source-meta'},
+          h('div',{},h('dt',{text:'Next due'}),h('dd',{text:next})),
+          h('div',{},h('dt',{text:'Last check'}),h('dd',{text:last+(fw.lastCheck?' · '+plural(fw.lastCheck.saved,'new item'):'')})),
+          h('div',{},h('dt',{text:'Memory'}),h('dd',{text:(fw.saved||0)+' kept · '+w+' waiting'}))),
+        fw.lastError?h('p',{class:'problem',text:'Last check failed. '+fw.lastError}):null,
         h('div',{class:'row'},
-          h('button',{class:'btn'+(w&&!open?' acc':''),type:'button','aria-expanded':String(open),text:open?'Close':(w?'Review '+w+' waiting':'See what it saved'),
+          h('button',{class:'btn'+(w&&!open?' acc':''),type:'button','aria-expanded':String(open),text:open?'Close items':(w?'Review '+w+' waiting':'See what it saved'),
             onclick:function(){state.src=open?'':fw.id;state.srcTab=w?'waiting':'kept';state.srcLeave='';render();}}),
+          fw.saved?h('button',{class:'btn ghost',type:'button',text:'Browse memories',onclick:function(){
+            openMemoryGroup({tag:'follow:'+fw.id,tagLabel:fw.title,from:'reference'});
+          }}):null,
           one,h('span',{class:'grow'}),
           h('button',{class:'btn warn',type:'button',text:'Remove',onclick:function(){state.srcLeave=state.srcLeave===fw.id?'':fw.id;render();}})),
-        h('label',{class:'row'},sw,h('span',{text:' Keep new items from this source without asking me'})));
+        settings(fw));
       if(state.srcLeave===fw.id)drawLeave(li,fw);
       if(open)drawPanel(li,fw);
       ul.appendChild(li);

@@ -42,7 +42,7 @@ from .constants import READINESS_HEADER, VERSION
 from .exact_recall import by_phrase
 from .move import backup_json
 from .dashboard_page import render_page
-from .follow import follow_add, follow_list, follow_memory_ids, follow_remove, follow_sync, follow_update
+from .follow import follow_add, follow_list, follow_memory_ids, follow_remove, follow_sync, follow_update, normalize_schedule
 from .import_memories import text_to_records
 from .ingest import check_url_async, fetch_landing_page, fetch_text
 from .origin import COLLECTION_FILTERS
@@ -251,6 +251,8 @@ class DashboardMiddleware:
                 )
             if name == 'inbox':
                 return _json(await brain.inbox_list())
+            if name == 'library':
+                return _json(await brain.memory_library())
             if name == 'memories':
                 status = q.get('status') or 'approved'
                 statuses = [s for s in status.split(',') if s in ALLOWED_STATUSES] or ['approved']
@@ -260,17 +262,20 @@ class DashboardMiddleware:
                 if collection is not None and collection not in COLLECTION_FILTERS:
                     return _err(400, 'INVALID_COLLECTION', 'Choose a listed collection.')
                 scope = q.get('scope')
+                unscoped = q.get('unscoped') == '1'
+                if scope and unscoped:
+                    return _err(400, 'INVALID_SCOPE', 'Choose one project or Across projects.')
                 tag = q.get('tag')
                 if text:
                     res = await brain.memory_search(text, approved_only=False, statuses=statuses, limit=min(limit, 50),
-                                                    collection=collection, scope=scope, tags=[tag] if tag else None)
+                                                    collection=collection, scope=scope, unscoped=unscoped, tags=[tag] if tag else None)
                     items = [r['memory'] for r in (res.get('results') or []) if isinstance(r.get('memory'), dict)]
                     return _json({'ok': True, 'total': len(items), 'offset': 0, 'items': items, 'searched': True})
                 sort = q.get('sort') if q.get('sort') in ('newest', 'oldest', 'title') else 'newest'
                 return _json(
                     await brain.memory_list(
                         statuses=statuses, tag=tag, sort=sort, limit=limit, offset=_int(q.get('offset'), 0),
-                        collection=collection, scope=scope,
+                        collection=collection, scope=scope, unscoped=unscoped,
                     )
                 )
             if name == 'follows':
@@ -342,7 +347,15 @@ class DashboardMiddleware:
                 return _err(400, 'INVALID_INPUT', 'Paste a YouTube channel address or a blog / newsletter address.')
             if not target.lower().startswith(('http://', 'https://')) and not target.startswith('UC'):
                 target = 'https://' + target
-            return _json(await follow_add(brain, target, fetch_text, auto_approve=body.get('autoApprove') is True))
+            try:
+                schedule = normalize_schedule(body['schedule']) if 'schedule' in body else None
+            except ValueError as exc:
+                return _err(400, 'INVALID_SCHEDULE', str(exc))
+            scope = body.get('scope')
+            if scope is not None and (not isinstance(scope, str) or len(scope) > 60):
+                return _err(400, 'INVALID_SCOPE', 'Project names can be up to 60 characters.')
+            return _json(await follow_add(brain, target, fetch_text, auto_approve=body.get('autoApprove') is True,
+                                          scope=scope, schedule=schedule))
         if name == 'settings/ai':  # free: a setting. Switching the paid AI step on or off is the owner's call.
             state = await builtin_ai.set_builtin(brain, body.get('on') is True)
             return _json({'ok': True, 'builtinAi': {'on': state['builtin']}})
@@ -393,12 +406,20 @@ class DashboardMiddleware:
                 return _err(400, 'INVALID_INPUT', 'id required')
             auto = body.get('autoApprove')
             title = body.get('title')
+            try:
+                schedule = normalize_schedule(body['schedule']) if 'schedule' in body else None
+            except ValueError as exc:
+                return _err(400, 'INVALID_SCHEDULE', str(exc))
+            scope = body.get('scope')
+            if scope is not None and (not isinstance(scope, str) or len(scope) > 60):
+                return _err(400, 'INVALID_SCOPE', 'Project names can be up to 60 characters.')
             return _json(
                 await follow_update(
                     brain,
                     fid,
                     auto_approve=auto if isinstance(auto, bool) else None,
                     title=str(title)[:200] if isinstance(title, str) else None,
+                    scope=scope, schedule=schedule,
                 )
             )
         if name == 'follows/sync':

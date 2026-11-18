@@ -55,7 +55,7 @@ from .ingest import check_url_async
 from .ingest_queue import IngestQueue, job_id_for
 from .ranking import MAX_QUERY_CHARS, QUERY_STOPWORDS, SCORER, RankIndex, hybrid_rank, is_expired, stem_tokens
 from .import_memories import normalize_plugin_export
-from .origin import Collection, SAID, context_provenance, matches_collection, origin_of, source_platform, usage_of
+from .origin import Collection, SAID, collection_fields, context_provenance, matches_collection, origin_of, source_platform, usage_of
 from .policy import evaluate as evaluate_policy
 from .policy import MAX_REPLACEMENTS_PER_DAY, MODE_OPEN, OPEN_CAP_FACTOR, load_policy, normalize_title_key
 from .storage import atomic_write, open_storage
@@ -203,6 +203,13 @@ def scope_tag_for(scope: str | None) -> str | None:
     return f'scope:{name[:60]}' if name else None
 
 
+def _project_names(tags: Any) -> set[str]:
+    return {
+        str(tag).strip().lower()[6:] for tag in (tags or [])
+        if str(tag).strip().lower().startswith('scope:') and str(tag).strip()[6:]
+    }
+
+
 INDEX_BUCKETS = 16  # the search index is stored in this many records; a save rewrites only the one it touched
 INDEX_FORMAT = 'sharded'
 
@@ -304,6 +311,7 @@ class BrainStore:
         # Lock order is always sources → meta; never take sources while holding meta.
         self._capture_lock = asyncio.Lock()
         self._sources_lock = asyncio.Lock()
+        self._follow_sync_lock = asyncio.Lock()
         # Warm-server search cache: analysed memories + the stamp of the index they came from.
         self._rank = RankIndex()
         self._idx_entries: dict[str, Any] | None = None
@@ -1836,6 +1844,7 @@ class BrainStore:
         scope: str | None = None,
         use_meaning: bool = True,
         collection: Collection | None = None,
+        unscoped: bool = False,
     ) -> dict[str, Any]:
         """Ranked search over the thin index. Reads take no lock (see _current_index_entries)."""
         return await self._memory_search_unlocked(
@@ -1847,6 +1856,7 @@ class BrainStore:
             scope=scope,
             use_meaning=use_meaning,
             collection=collection,
+            unscoped=unscoped,
         )
 
     async def _memory_search_unlocked(
@@ -1860,6 +1870,7 @@ class BrainStore:
         scope: str | None = None,
         use_meaning: bool = True,
         collection: Collection | None = None,
+        unscoped: bool = False,
     ) -> dict[str, Any]:
         if self._holds_batch():  # inside an import batch: use its in-memory index, no cache
             entries = dict((await self._get_search_index()).get('entries') or {})
@@ -1884,6 +1895,8 @@ class BrainStore:
             if is_expired(entry, now_dt):
                 continue
             if scope_tag and scope_tag not in {str(t).lower() for t in (entry.get('tags') or [])}:
+                continue
+            if unscoped and _project_names(entry.get('tags')):
                 continue
             if not matches_collection(entry, collection):
                 continue
@@ -2293,6 +2306,23 @@ use_meaning
         rows.sort(key=lambda e: str(e.get('updatedAt') or ''), reverse=True)
         return [card_from_index_entry(e) for e in rows[: max(limit, 0)]]
 
+    async def memory_library(self) -> dict[str, Any]:
+        """Count kept memories by project and origin without reading their bodies."""
+        projects: dict[str, dict[str, Any]] = {}
+        now = datetime.now(UTC)
+        total = 0
+        for entry in (await self._current_index_entries()).values():
+            if not isinstance(entry, dict) or entry.get('status') != 'approved' or is_expired(entry, now):
+                continue
+            total += 1
+            collection = collection_fields(entry)['collection']
+            for scope in _project_names(entry.get('tags')) or {''}:
+                group = projects.setdefault(scope, {'scope': scope, 'total': 0, 'collections': {}})
+                group['total'] += 1
+                counts = group['collections']
+                counts[collection] = counts.get(collection, 0) + 1
+        return {'ok': True, 'total': total, 'projects': [projects[k] for k in sorted(projects, key=lambda k: (not k, k))]}
+
     async def memory_list(
         self,
         *,
@@ -2303,16 +2333,20 @@ use_meaning
         offset: int = 0,
         scope: str | None = None,
         collection: Collection | None = None,
+        unscoped: bool = False,
     ) -> dict[str, Any]:
         """Page through memories from the thin index (owner dashboard). Lock-free read, no bodies."""
         entries = await self._current_index_entries()
         allowed = {str(x) for x in statuses} if statuses else {'approved'}
         want = {item for item in ((tag or '').strip().lower(), scope_tag_for(scope)) if item}
+        now = datetime.now(UTC)
         rows = [
             e
             for e in entries.values()
             if isinstance(e, dict)
             and e.get('status') in allowed
+            and (e['status'] != 'approved' or not is_expired(e, now))
+            and (not unscoped or not _project_names(e.get('tags')))
             and (not want or want.issubset(str(t).lower() for t in (e.get('tags') or [])))
             and matches_collection(e, collection)
         ]
