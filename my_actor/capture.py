@@ -116,11 +116,41 @@ def _title_for(sentence: str) -> str:
     return (title[:1].upper() + title[1:])[:120]
 
 
+_SPEAKER = re.compile(r"^\s*(user|human|assistant|system|tool|developer|chatgpt|claude|gemini):[ \t]*(.*)$", re.I)
+
+
+def user_turns(text: str) -> list[str] | None:
+    """Extract explicitly labelled user turns. Plain notes have no transcript envelope."""
+    turns: list[str] = []
+    speaker = None
+    for line in text.splitlines():
+        match = _SPEAKER.match(line)
+        if match:
+            speaker = match[1].casefold()
+            if speaker in ('user', 'human'):
+                turns.append(match[2])
+        elif speaker in ('user', 'human'):
+            turns[-1] += '\n' + line
+    return turns if speaker is not None else None
+
+
+_NO_CAPTURE = re.compile(
+    r"\b(?:do not|don['’]t|never)\s+(?:save|store|remember|record|memorize|memorise)\s+"
+    r"(?:this|that|anything|what I|my|our|the following)\b|\boff the record\b", re.I,
+)
+
+
+def capture_declined(text: str) -> bool:
+    return bool(_NO_CAPTURE.search(text or ''))
+
+
 def extract_candidates(text: str, *, max_items: int = MAX_CANDIDATES) -> list[dict[str, Any]]:
     """Return up to `max_items` {title, content, type, confidence, reason} found in `text`."""
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
     limit = max(1, min(max_items, MAX_CANDIDATES))
+    if capture_declined(text):
+        return []
     pieces = [c for raw in _SPLIT_RE.split((text or '')[:MAX_TEXT_CHARS]) for c in _clauses(_clean(raw))]
     for raw in pieces:
         sentence = _clean(raw)
@@ -154,6 +184,9 @@ _CHANGE_RE = re.compile(
     r"used to|as of (?:today|now)|from now on)\b",
     re.IGNORECASE,
 )
+_PREFERENCE_PAIR = re.compile(
+    r"^(i|we) (?:really )?prefer (.+?) over (.+?)( (?:for|when|at|during|in|on) .+)?$", re.I,
+)
 _TOKEN_RE = re.compile(r"[a-z0-9']+")
 _FILLER = frozenset('a an the of to in on at by for with and or is are was now really very just'.split())
 REPLACE_CUE_OVERLAP = 0.5  # with a change word ("now", "no longer"), this much shared wording is enough
@@ -161,6 +194,15 @@ REPLACE_CUE_OVERLAP = 0.5  # with a change word ("now", "no longer"), this much 
 
 def _toks(text: str) -> list[str]:
     return [w for w in _TOKEN_RE.findall(text.lower()) if w not in _FILLER]
+
+
+def same_fact(left: str, right: str) -> bool:
+    """Allow superficial restatements while preserving word order, negation, symbols and numbers."""
+    def normalized(text: str) -> str:
+        text = re.sub(r"^(i|we) really (?=prefer\b)", r"\1 ", text.strip(), flags=re.I)
+        return ' '.join(text.casefold().split()).rstrip('.!')
+
+    return normalized(left) == normalized(right)
 
 
 def replaces(new: str, old: str) -> bool:
@@ -171,12 +213,18 @@ def replaces(new: str, old: str) -> bool:
     (2) `new` carries a change word ("now", "no longer", "switched to") and shares at least half
     its wording with `old`. Anything else is treated as a separate fact.
     """
+    pair = [_PREFERENCE_PAIR.fullmatch(' '.join(value.casefold().split()).rstrip('.!')) for value in (new, old)]
+    if all(pair):
+        left, right = (m.groups() for m in pair)
+        return left == (right[0], right[2], right[1], right[3])
     a, b = _SUBJECT_RE.match(new.strip().rstrip('.!')), _SUBJECT_RE.match(old.strip().rstrip('.!'))
     if a and b:
         sa, sb = _toks(a.group(1)), _toks(b.group(1))
         va, vb = set(_toks(a.group(2))), set(_toks(b.group(2)))
-        if sa and sa == sb and va and vb and va != vb:
-            return True
+        single_value = re.search(r"\b(?:favou?rite|timezone|time zone|deadline|budget|editor|currency|"
+                                 r"manager|name|city|country|price|limit|standup|default)\b", a.group(1), re.I)
+        if sa and sa == sb:
+            return bool(single_value and va and vb and va != vb)
     if _CHANGE_RE.search(new):
         wa, wb = set(_toks(_CHANGE_RE.sub(' ', new))), set(_toks(old))
         if len(wa) >= 3 and len(wb) >= 3 and len(wa & wb) / len(wa | wb) >= REPLACE_CUE_OVERLAP and wa != wb:

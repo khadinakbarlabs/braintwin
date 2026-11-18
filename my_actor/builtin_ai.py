@@ -29,7 +29,7 @@ DAILY_LIMIT = 300  # AI calls per user per day
 MIN_CHARS = 40
 _PERSONAL_RE = re.compile(r"\b(?:i|i'm|i've|i'd|my|mine|me|we|we're|we've|our|ours|us)\b", re.IGNORECASE)
 
-logger = logging.getLogger('apify.second_brain.ai')
+logger = logging.getLogger('apify.braintwin.ai')
 
 
 _REQUEST_RE = re.compile(

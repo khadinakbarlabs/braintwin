@@ -11,14 +11,17 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import json
 import os
 import re
 import sqlite3
-from collections.abc import AsyncIterator
+import time
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from typing import Any, Protocol
 
+from .brand import env_value
 from .constants import (
     AUDIT_DATASET_NAME,
     BACKEND_ACTOR,
@@ -59,9 +62,9 @@ def check_key(key: str) -> str:
 
 
 def resolve_backend(explicit: str | None = None, *, default: str = BACKEND_ACTOR) -> str:
-    """Explicit arg > SECOND_BRAIN_BACKEND > SECOND_BRAIN_LOCAL=1 > caller default."""
-    name = (explicit or os.environ.get(ENV_BACKEND) or '').strip().lower()
-    if not name and os.environ.get(ENV_LOCAL, '').strip() == '1':
+    """Explicit arg > BRAINTWIN_BACKEND > BRAINTWIN_LOCAL=1 > caller default."""
+    name = (explicit or env_value(ENV_BACKEND) or '').strip().lower()
+    if not name and env_value(ENV_LOCAL).strip() == '1':
         name = BACKEND_SQLITE
     name = name or default
     if name not in BACKENDS:
@@ -119,7 +122,12 @@ class MemoryAudit:
 
 
 def default_sqlite_path() -> Path:
-    return Path(os.environ.get(ENV_SQLITE_PATH) or DEFAULT_SQLITE_PATH).expanduser()
+    configured = env_value(ENV_SQLITE_PATH)
+    if configured:
+        return Path(configured).expanduser()
+    current = Path(DEFAULT_SQLITE_PATH).expanduser()
+    legacy = Path('~/.second-brain/brain.sqlite').expanduser()
+    return legacy if legacy.is_file() and not current.exists() else current
 
 
 def _connect(path: Path) -> sqlite3.Connection:
@@ -131,10 +139,23 @@ def _connect(path: Path) -> sqlite3.Connection:
     old_umask = os.umask(0o077)
     try:
         conn = sqlite3.connect(str(path), timeout=10, isolation_level=None, check_same_thread=False)
-        conn.execute('PRAGMA journal_mode=WAL')
-        conn.execute('PRAGMA busy_timeout=10000')
-        conn.execute('CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
-        conn.execute('CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY AUTOINCREMENT, item TEXT NOT NULL)')
+        try:
+            conn.execute('PRAGMA busy_timeout=10000')
+            # The first switch to WAL can return BUSY immediately when two tools open a new file.
+            deadline = time.monotonic() + 2
+            while True:
+                try:
+                    conn.execute('PRAGMA journal_mode=WAL')
+                    break
+                except sqlite3.OperationalError as exc:
+                    if exc.sqlite_errorcode != sqlite3.SQLITE_BUSY or time.monotonic() >= deadline:
+                        raise
+                    time.sleep(0.05)
+            conn.execute('CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
+            conn.execute('CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY AUTOINCREMENT, item TEXT NOT NULL)')
+        except BaseException:
+            conn.close()
+            raise
     finally:
         os.umask(old_umask)
     if on_disk:
@@ -144,12 +165,50 @@ def _connect(path: Path) -> sqlite3.Connection:
     return conn
 
 
+_writer = contextvars.ContextVar('braintwin_sqlite_writer', default=None)
+
+
+def _connection(base):
+    active = _writer.get()
+    return active[1] if active and active[0] is base else base
+
+
+@contextlib.asynccontextmanager
+async def atomic_write(kv):
+    """File-backed SQLite writers see one consistent manifest, record, audit and index."""
+    if not isinstance(kv, SqliteKV) or _connection(kv._conn).in_transaction:
+        yield
+        return
+    base = kv._conn
+    database = base.execute('PRAGMA database_list').fetchone()[2]
+    writer = sqlite3.connect(database, timeout=0, isolation_level=None) if database else base
+    try:
+        deadline = time.monotonic() + 10
+        while True:
+            try:
+                writer.execute('BEGIN IMMEDIATE')
+                break
+            except sqlite3.OperationalError as exc:
+                if exc.sqlite_errorcode != sqlite3.SQLITE_BUSY or time.monotonic() >= deadline:
+                    raise
+                await asyncio.sleep(0.01)
+        token = _writer.set((base, writer))
+        try:
+            with writer:
+                yield
+        finally:
+            _writer.reset(token)
+    finally:
+        if writer is not base:
+            writer.close()
+
+
 class SqliteKV:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
 
     async def get_value(self, key: str) -> Any:
-        row = self._conn.execute('SELECT value FROM kv WHERE key = ?', (key,)).fetchone()
+        row = _connection(self._conn).execute('SELECT value FROM kv WHERE key = ?', (key,)).fetchone()
         return None if row is None else json.loads(row[0])
 
     async def set_value(self, key: str, value: Any) -> None:
@@ -157,18 +216,18 @@ class SqliteKV:
         if value is None:
             await self.delete_value(key)
             return
-        self._conn.execute(
+        _connection(self._conn).execute(
             'INSERT INTO kv (key, value) VALUES (?, ?) '
             'ON CONFLICT(key) DO UPDATE SET value = excluded.value',
             (key, json.dumps(value, ensure_ascii=False)),
         )
 
     async def delete_value(self, key: str) -> None:
-        self._conn.execute('DELETE FROM kv WHERE key = ?', (key,))
+        _connection(self._conn).execute('DELETE FROM kv WHERE key = ?', (key,))
 
     async def list_keys(self, prefix: str = '') -> list[str]:
         # substr compare, not LIKE: '_' and '%' in prefixes must stay literal.
-        rows = self._conn.execute(
+        rows = _connection(self._conn).execute(
             'SELECT key FROM kv WHERE substr(key, 1, ?) = ? ORDER BY key', (len(prefix), prefix)
         ).fetchall()
         return [r[0] for r in rows]
@@ -179,12 +238,12 @@ class SqliteAudit:
         self._conn = conn
 
     async def push_data(self, item: dict[str, Any]) -> None:
-        self._conn.execute('INSERT INTO audit (item) VALUES (?)', (json.dumps(item, ensure_ascii=False),))
+        _connection(self._conn).execute('INSERT INTO audit (item) VALUES (?)', (json.dumps(item, ensure_ascii=False),))
 
     async def iterate_items(self, *, limit: int = 500, desc: bool = False) -> AsyncIterator[dict[str, Any]]:
         order = 'DESC' if desc else 'ASC'
         # `order` is one of two fixed literals above, never caller input.
-        rows = self._conn.execute(f'SELECT item FROM audit ORDER BY id {order} LIMIT ?', (int(limit),)).fetchall()  # noqa: S608
+        rows = _connection(self._conn).execute(f'SELECT item FROM audit ORDER BY id {order} LIMIT ?', (int(limit),)).fetchall()  # noqa: S608
         for (raw,) in rows:
             yield json.loads(raw)
 
@@ -192,6 +251,18 @@ class SqliteAudit:
 def open_sqlite(path: str | Path | None = None) -> tuple[SqliteKV, SqliteAudit]:
     conn = _connect(Path(path).expanduser() if path else default_sqlite_path())
     return SqliteKV(conn), SqliteAudit(conn)
+
+
+@contextlib.contextmanager
+def sqlite_transaction() -> Iterator[tuple[SqliteKV, SqliteAudit]]:
+    """Serialize a short-lived local writer before it reads the shared memory index."""
+    conn = _connect(default_sqlite_path())
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        with conn:
+            yield SqliteKV(conn), SqliteAudit(conn)
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------- Apify REST API

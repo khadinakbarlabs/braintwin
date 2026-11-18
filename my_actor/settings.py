@@ -20,6 +20,7 @@ import secrets
 import time
 from typing import Any
 
+from .brand import env_value
 from .embeddings import EmbeddingConfig, embedding_config
 
 KEY_DASHBOARD_KEY = 'config.dashboard_key'
@@ -159,10 +160,10 @@ def embeddings_from_record(record: Any) -> EmbeddingConfig | None:
         return None
     return embedding_config(
         {
-            'SECOND_BRAIN_EMBEDDINGS_URL': str(record.get('url') or ''),
-            'SECOND_BRAIN_EMBEDDINGS_MODEL': str(record.get('model') or ''),
-            'SECOND_BRAIN_EMBEDDINGS_KEY': str(record.get('key') or ''),
-            'SECOND_BRAIN_EMBEDDINGS_DIMS': str(record.get('dims') or ''),
+            'BRAINTWIN_EMBEDDINGS_URL': str(record.get('url') or ''),
+            'BRAINTWIN_EMBEDDINGS_MODEL': str(record.get('model') or ''),
+            'BRAINTWIN_EMBEDDINGS_KEY': str(record.get('key') or ''),
+            'BRAINTWIN_EMBEDDINGS_DIMS': str(record.get('dims') or ''),
         }
     )
 
@@ -204,4 +205,4 @@ def env_dashboard_key() -> str:
     """Environment key, ignored on the Apify platform (it would be shared by every user)."""
     if on_platform():
         return ''
-    return (os.environ.get('SECOND_BRAIN_DASHBOARD_KEY') or '').strip()
+    return (env_value('BRAINTWIN_DASHBOARD_KEY') or '').strip()

@@ -32,7 +32,7 @@ _TEXT_BLOCKS = frozenset(
     }
 )  # fmt: skip
 
-logger = logging.getLogger('apify.second_brain.notion')
+logger = logging.getLogger('apify.braintwin.notion')
 
 
 def token_problem(token: Any) -> str | None:

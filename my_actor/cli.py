@@ -37,7 +37,7 @@ from .constants import (
     MAX_SCRAPE_ITEMS,
     MAX_SYNC_WRITES,
 )
-from .hooks import run_hook
+from .hooks import CLIENTS, empty_output, run_hook
 from .policy import DEFAULT_POLICY, parse_policy_value
 from .follow import follow_add, follow_list, follow_remove, follow_sync, queue_transcripts
 from .ingest import fetch_text
@@ -45,6 +45,7 @@ from .ingest_worker import drain
 from .owned_actors import check_owned_actor, validate_budget
 from .move import export_to_file, move_memories
 from .sync_runner import sync_plugin_export
+from .storage import sqlite_transaction
 
 
 def _emit(payload: Any) -> None:
@@ -119,9 +120,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     hk = sub.add_parser('hook', help='for AI coding tools: run as a hook so saving does not depend on the AI (reads hook JSON on stdin)')
     hk.add_argument('event', choices=['session-start', 'prompt'])
-    hk.add_argument('--client', default='claude-code', help='claude-code, codex or cursor (labels where the memory came from)')
+    hk.add_argument('--client', choices=CLIENTS, default='claude-code', help='AI tool that invoked the hook')
 
-    ib = sub.add_parser('inbox', help='owner-only review: list, approve, reject (works in SECOND_BRAIN_APPROVAL=human mode)')
+    ib = sub.add_parser('inbox', help='owner-only review: list, approve, reject (works in BRAINTWIN_APPROVAL=human mode)')
     ibsub = ib.add_subparsers(dest='inbox_command', required=True)
     ibsub.add_parser('list')
     ia = ibsub.add_parser('approve')
@@ -262,12 +263,25 @@ async def _cmd_policy(brain: BrainStore, args: argparse.Namespace) -> tuple[Any,
     return {'ok': True, 'policy': await brain.set_policy({args.key: value})}, 0
 
 
-async def _cmd_hook(brain: BrainStore, args: argparse.Namespace) -> tuple[Any, int]:
-    raw = '' if sys.stdin.isatty() else sys.stdin.read(200_000)
-    return await run_hook(brain, args.event, args.client, raw), 0  # a hook always exits 0
+async def _cmd_hook(args: argparse.Namespace) -> dict[str, Any]:
+    try:
+        raw = '' if sys.stdin.isatty() else sys.stdin.read(200_001)
+        if len(raw) > 200_000:
+            return empty_output(args.event, args.client)
+        # Prompt hooks use the local database regardless of the regular CLI backend.
+        with sqlite_transaction() as (kv, audit):
+            brain = BrainStore(kv=kv, audit=audit)
+            await brain.init()
+            brain.use_embedder(None)
+            return await run_hook(brain, args.event, args.client, raw, raise_on_error=True)
+    except Exception:  # noqa: BLE001 - even an unavailable database must not block a prompt
+        return empty_output(args.event, args.client)
 
 
 async def _run(args: argparse.Namespace) -> int:
+    if args.command == 'hook':
+        _emit(await _cmd_hook(args))
+        return 0
     if args.command == 'move':  # two stores at once, so it does not use the shared one
         payload = await move_memories(args.source, args.target, dry_run=args.dry_run)
         _emit(payload)
@@ -275,7 +289,7 @@ async def _run(args: argparse.Namespace) -> int:
     if args.backend:
         os.environ[ENV_BACKEND] = args.backend
     brain = await get_brain(default_backend=BACKEND_SQLITE)
-    handlers = {'health': _cmd_health, 'export': _cmd_export, 'sync': _cmd_sync, 'ingest': _cmd_ingest, 'follow': _cmd_follow, 'inbox': _cmd_inbox, 'policy': _cmd_policy, 'hook': _cmd_hook}
+    handlers = {'health': _cmd_health, 'export': _cmd_export, 'sync': _cmd_sync, 'ingest': _cmd_ingest, 'follow': _cmd_follow, 'inbox': _cmd_inbox, 'policy': _cmd_policy}
     payload, code = await handlers[args.command](brain, args)
     _emit(payload)
     return code

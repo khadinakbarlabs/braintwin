@@ -21,6 +21,7 @@ from datetime import timedelta
 from decimal import Decimal
 from typing import Any
 
+from .brand import env_value
 from .constants import (
     DEFAULT_OWNED_ACTOR_OWNER,
     ENV_OWNED_ACTOR_OWNER,
@@ -36,7 +37,7 @@ RUN_TIMEOUT = timedelta(minutes=15)
 
 
 def owned_owner() -> str:
-    return (os.environ.get(ENV_OWNED_ACTOR_OWNER) or DEFAULT_OWNED_ACTOR_OWNER).strip().lower()
+    return (env_value(ENV_OWNED_ACTOR_OWNER) or DEFAULT_OWNED_ACTOR_OWNER).strip().lower()
 
 
 def check_owned_actor(raw: Any) -> tuple[str | None, str | None]:

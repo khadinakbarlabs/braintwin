@@ -1,4 +1,4 @@
-"""Second-brain lifecycle on a pluggable store (Apify KV+Dataset, Apify REST API, or SQLite)."""
+"""Braintwin lifecycle on a pluggable store (Apify KV+Dataset, Apify REST API, or SQLite)."""
 
 from __future__ import annotations
 
@@ -6,12 +6,14 @@ import asyncio
 import contextvars
 import hashlib
 import logging
+import sys
 import time
 import uuid
 import zlib
 from datetime import datetime, UTC
 from typing import Any
 
+from .brand import env_value
 from .constants import (
     AUDIT_DATASET_NAME,
     BACKEND_ACTOR,
@@ -56,7 +58,7 @@ from .import_memories import normalize_plugin_export
 from .origin import SAID, context_provenance, origin_of, usage_of
 from .policy import evaluate as evaluate_policy
 from .policy import MAX_REPLACEMENTS_PER_DAY, MODE_OPEN, OPEN_CAP_FACTOR, load_policy, normalize_title_key
-from .storage import open_storage
+from .storage import atomic_write, open_storage
 from .search import (
     bm25_rank,
     card_from_index_entry,
@@ -71,7 +73,7 @@ from .search import (
 
 # True only inside the task that opened a batch. A plain "is a batch open?" flag is shared by
 # every task, which let other tool calls slip into the buffer without the lock.
-_in_batch: contextvars.ContextVar[bool] = contextvars.ContextVar('second_brain_in_batch', default=False)
+_in_batch: contextvars.ContextVar[bool] = contextvars.ContextVar('braintwin_in_batch', default=False)
 
 
 def _now() -> str:
@@ -88,7 +90,7 @@ def _new_id(prefix: str) -> str:
 
 # Only the owner-run follow sync may use the reserved `followed` / `follow:*` tags and `follow:`
 # dedupe keys. Agents cannot forge followed content or pre-empt a real item's dedupe key.
-allow_reserved: contextvars.ContextVar[bool] = contextvars.ContextVar('second_brain_allow_reserved', default=False)
+allow_reserved: contextvars.ContextVar[bool] = contextvars.ContextVar('braintwin_allow_reserved', default=False)
 
 
 def _is_reserved_tag(tag: str) -> bool:
@@ -101,8 +103,13 @@ def _dedupe_key(title: str, content: str, explicit: str | None) -> str:
         explicit = None
     if explicit:
         return explicit.strip()[:200]
-    raw = f'{title.strip().lower()}|{content.strip().lower()[:500]}'
+    raw = f'{title.strip().lower()}|{content.strip()[:50_000].lower()}'
     return hashlib.sha256(raw.encode('utf-8')).hexdigest()[:32]
+
+
+def _source_key(url: str, version: str, part: str = '') -> str:
+    key = f'source:{url}{version}{part}'
+    return key if len(key) <= 200 else 'source:' + hashlib.sha256(key.encode()).hexdigest()
 
 
 def _clamp_confidence(value: Any) -> float:
@@ -289,6 +296,7 @@ class BrainStore:
         self._auto_lock = asyncio.Lock()  # serialises clash check + approve for automatic approvals
         # Serialize source-list read-modify-write (worker runs fetches concurrently).
         # Lock order is always sources → meta; never take sources while holding meta.
+        self._capture_lock = asyncio.Lock()
         self._sources_lock = asyncio.Lock()
         # Warm-server search cache: analysed memories + the stamp of the index they came from.
         self._rank = RankIndex()
@@ -372,6 +380,10 @@ class BrainStore:
             self._kv, self._audit, self.backend_name = await open_storage(
                 self._backend_arg, default=self._default_backend
             )
+        async with atomic_write(self._kv):
+            await self._init_records()
+
+    async def _init_records(self) -> None:
         self.queue = IngestQueue(self._kv)
         if self._embedder is None:
             from .settings import load_embeddings  # local import: settings imports embeddings too
@@ -415,7 +427,7 @@ class BrainStore:
                     'name': 'default',
                     'createdAt': _now(),
                     'updatedAt': _now(),
-                    'notes': 'Personal second-brain profile (not official Apify MCP).',
+                    'notes': 'Personal braintwin profile (not official Apify MCP).',
                 },
             )
         await self._ensure_search_index()
@@ -435,7 +447,11 @@ class BrainStore:
             self._batch['depth'] = int(self._batch.get('depth') or 1) + 1  # type: ignore[index]
             return
         await self._meta_lock.acquire()
+        transaction = atomic_write(self._kv)
+        entered = False
         try:
+            await transaction.__aenter__()
+            entered = True
             # Load from KV directly (batch not set yet).
             assert self._kv is not None
             manifest = _normalize_manifest(await self._kv.get_value(KEY_MANIFEST))
@@ -457,9 +473,13 @@ class BrainStore:
                 'dirty_inbox': False,
                 'dirty_index': False,
                 'depth': 1,
+                'transaction': transaction,
+                'opening_error': sys.exception(),
             }
             self._batch['token'] = _in_batch.set(True)
-        except Exception:
+        except BaseException:
+            if entered:
+                await transaction.__aexit__(*sys.exc_info())
             self._batch = None
             self._meta_lock.release()
             raise
@@ -476,6 +496,7 @@ class BrainStore:
             self._batch['depth'] = depth  # type: ignore[index]
             return
         token = self._batch.get('token')  # type: ignore[union-attr]
+        transaction = self._batch['transaction']
         try:
             # Persist index before manifest so readers that see new ids can rebuild if needed.
             batch = self._batch
@@ -498,14 +519,18 @@ class BrainStore:
             if batch.get('audit'):  # history rows do not depend on each other
                 await asyncio.gather(*(self._persist_audit(**event) for event in batch['audit']))
         finally:
-            self._batch = None
-            if token is not None:
-                try:
-                    _in_batch.reset(token)
-                except ValueError:  # reset from a different context: just clear the flag
-                    _in_batch.set(False)
-            if self._meta_lock.locked():
-                self._meta_lock.release()
+            try:
+                error = sys.exc_info() if sys.exception() is not batch['opening_error'] else (None, None, None)
+                await transaction.__aexit__(*error)
+            finally:
+                self._batch = None
+                if token is not None:
+                    try:
+                        _in_batch.reset(token)
+                    except ValueError:  # reset from a different context: just clear the flag
+                        _in_batch.set(False)
+                if self._meta_lock.locked():
+                    self._meta_lock.release()
 
     async def audit(
         self,
@@ -863,7 +888,8 @@ class BrainStore:
             'title': ingest.get('title'),
         }
         source['updatedAt'] = _now()
-        content = (ingest.get('text') or '')[:20_000]
+        fetched = ingest.get('text') or ''
+        content = fetched[:50_000]
         if not content.strip():
             source['filedNew'] = False  # a page with no readable text files nothing
             return
@@ -871,7 +897,17 @@ class BrainStore:
         version = f"@{ingest['version']}" if ingest.get('version') else ''
         source['version'] = version
         all_tags = list(set((tags or source.get('tags') or []) + ['source', 'ingest']))
-        provenance: dict[str, Any] = {'sourceUrl': source['url'], 'untrusted': True}
+        provenance: dict[str, Any] = {
+            'sourceUrl': source['url'], 'untrusted': True, 'storedChars': len(content),
+            'inputLimitReached': bool(ingest.get('inputLimitReached')) or len(fetched) > len(content),
+        }
+        previous_id = source.get('proposedMemoryId')
+        if previous_id:
+            previous = await self.get_memory(previous_id)
+            if previous and previous.get('status') == 'approved':
+                provenance['supersedes'] = previous_id
+            elif previous and (previous.get('provenance') or {}).get('supersedes'):
+                provenance['supersedes'] = previous['provenance']['supersedes']
         keep, reasons, rule = (await self._auto_decision(source['title'], content, all_tags, provenance)) if auto else (False, ['not_automatic'], '')
         if keep:
             provenance['autoApproved'] = {'rule': rule, 'at': _now()}
@@ -885,7 +921,7 @@ class BrainStore:
                 citations=[{'url': source['url'], 'sourceId': source['id']}],
                 confidence=0.6,
                 approve=keep,
-                dedupe_key=f"source:{source['url']}{version}",
+                dedupe_key=_source_key(source['url'], version),
                 provenance=provenance,
             )
             source['proposedMemoryId'] = mem.get('memory', {}).get('id')
@@ -893,6 +929,8 @@ class BrainStore:
             if mem.get('decided'):
                 source['alreadyDecided'] = True  # the owner rejected or forgot this page before
             limit = LONG_SOURCE_PASSAGES if ingest.get('kind') == 'youtube' else None
+            if keep and source['filedNew']:
+                await self._retire_superseded(mem['memory'], _now())
             await self._file_passages(source, mem, ingest.get('text') or '', tags, approve=keep, limit=limit)
             await self.audit(
                 'ingest',
@@ -941,7 +979,7 @@ class BrainStore:
                         citations=[{'url': source['url'], 'sourceId': source['id']}],
                         confidence=0.6,
                         approve=approve,
-                        dedupe_key=f"source:{source['url']}{source.get('version') or ''}#p{i}",
+                        dedupe_key=_source_key(source['url'], source.get('version') or '', f'#p{i}'),
                         provenance={'sourceUrl': source['url'], 'untrusted': True, 'parentId': parent_id},
                     )
                 cid = (res.get('memory') or {}).get('id')
@@ -1048,13 +1086,20 @@ class BrainStore:
                 source = {'id': _new_id('src'), 'url': url, 'title': title[:500], 'tags': _clean_tags(tags), 'createdAt': _now(), 'updatedAt': _now(), 'lastIngest': None}
                 sources.append(source)
             source['title'] = title[:500]
+            if not ingest.get('version'):
+                fingerprint = hashlib.sha256((ingest.get('text') or '').encode()).hexdigest()
+                if source.get('contentHash') == fingerprint:
+                    return {'ok': True, 'filedNew': False, 'source': source, 'memoryId': old_id}
+                ingest = {**ingest, 'version': hashlib.sha256(f'{old_id}|{fingerprint}'.encode()).hexdigest()[:24]}
+                source['contentHash'] = fingerprint
             await self._apply_ingest(source, ingest, tags, auto=True)
             await self._set_sources(sources)
-        new_id = source.get('proposedMemoryId')
+            new_id = source.get('proposedMemoryId')
+            if source.get('filedNew') and old_id and old_id != new_id:
+                previous = await self.get_memory(old_id)
+                if previous and previous.get('status') == 'proposed':
+                    await self.memory_forget(old_id, reason='replaced by a newer source proposal')
         filed = bool(source.get('filedNew'))
-        if filed:
-            if old_id and old_id != new_id:
-                await self.memory_forget(str(old_id), reason='replaced by a newer version of the page')
         return {'ok': True, 'filedNew': filed, 'source': source, 'memoryId': new_id}
 
     async def source_apply_ingest(self, source_id: str, ingest: dict[str, Any]) -> dict[str, Any]:
@@ -1149,19 +1194,20 @@ class BrainStore:
                 return card
         return None
 
-    async def _capture_checks(self, content: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    async def _capture_checks(self, content: str, scope: str | None = None) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         """(same note already stored, approved note this one replaces) from ONE search."""
-        from .capture import replaces
+        from .capture import replaces, same_fact
 
-        words = set(stem_tokens(content)) - QUERY_STOPWORDS
-        # Word overlap is what both checks need, so skip the (slower, paid) meaning search here.
-        found = await self.memory_search(content[:MAX_QUERY_CHARS], statuses=['approved', 'proposed'], limit=5, use_meaning=False)
+        found = await self.memory_search(content[:MAX_QUERY_CHARS], statuses=['approved', 'proposed'],
+                                         scope=scope, limit=12, use_meaning=False)
         replaced: dict[str, Any] | None = None
         for row in found.get('results') or []:
             card = row.get('memory') or {}
+            scopes = {str(tag).lower() for tag in card.get('tags', []) if str(tag).lower().startswith('scope:')}
+            if scopes != ({scope_tag_for(scope)} if scope else set()):
+                continue
             summary = str(card.get('summary') or '')
-            other = set(stem_tokens(summary)) - QUERY_STOPWORDS
-            if len(words) >= NEAR_DUP_MIN_WORDS and other and len(words & other) / len(words | other) >= NEAR_DUP_JACCARD:
+            if same_fact(content, summary):
                 return card, None
             if (
                 replaced is None
@@ -1221,7 +1267,27 @@ class BrainStore:
         before anything is written, and every note of the call is written in a single batch.
         Same outcome as before: duplicates skipped, replaced facts retired, held items wait.
         """
-        checks = await asyncio.gather(*(self._capture_checks(c['content']) for c in candidates))
+        from .capture import replaces, same_fact
+
+        # Usually one bulk write. A correction in the same utterance must see the earlier decision.
+        groups: list[list[dict[str, Any]]] = [[]]
+        for candidate in candidates:
+            if any(same_fact(candidate['content'], c['content']) or replaces(candidate['content'], c['content'])
+                   for c in groups[-1]):
+                groups.append([])
+            groups[-1].append(candidate)
+        result: dict[str, Any] = {'items': [], 'already': 0, 'failed': 0}
+        async with self._capture_lock:
+            for group in groups:
+                part = await self._save_capture_group(group, tags, agent, auto, situation, source_text)
+                result['items'].extend(part['items'])
+                result['already'] += part['already']
+                result['failed'] += part['failed']
+        return result
+
+    async def _save_capture_group(self, candidates, tags, agent, auto, situation, source_text):
+        scope = next((t[6:] for t in tags if t.lower().startswith('scope:')), None)
+        checks = await asyncio.gather(*(self._capture_checks(c['content'], scope) for c in candidates))
         policy = await self.get_policy()
         open_mode = policy.get('mode') == MODE_OPEN
         entries = await self._current_index_entries() if (auto and not open_mode) else {}
@@ -1282,12 +1348,15 @@ class BrainStore:
                     res = await self.memory_save(
                         title=cand['title'], content=cand['content'], memory_type=cand['type'], tags=tags,
                         confidence=cand['confidence'], provenance=prov, approve=approve,
+                        dedupe_key=(hashlib.sha256(f"capture|{scope.lower()}|{cand['content'].casefold()}".encode()).hexdigest()
+                                    if scope else None),
                     )  # fmt: skip
                     rec = res.get('memory') or {}
                     if not res.get('ok'):
                         failed += 1  # tell the caller instead of reporting a quiet success
                         continue
                     if res.get('duplicate'):
+                        already += 1
                         continue
                     row: dict[str, Any] = {'id': rec.get('id'), 'title': rec.get('title'), 'type': rec.get('type'), 'approved': approve}
                     rule = p['rule']
@@ -1442,21 +1511,22 @@ class BrainStore:
         if owns_lock:
             await self._meta_lock.acquire()
         try:
-            return await self._memory_save_locked(
-                title=title,
-                content=content,
-                memory_type=memory_type,
-                tags=tags,
-                citations=citations,
-                confidence=confidence,
-                approve=approve,
-                dedupe_key=dedupe_key,
-                memory_id=memory_id,
-                external_ids=external_ids,
-                provenance=provenance,
-                dry_run=dry_run,
-                expires_at=expires_at,
-            )
+            async with atomic_write(self._kv):
+                return await self._memory_save_locked(
+                    title=title,
+                    content=content,
+                    memory_type=memory_type,
+                    tags=tags,
+                    citations=citations,
+                    confidence=confidence,
+                    approve=approve,
+                    dedupe_key=dedupe_key,
+                    memory_id=memory_id,
+                    external_ids=external_ids,
+                    provenance=provenance,
+                    dry_run=dry_run,
+                    expires_at=expires_at,
+                )
         finally:
             if owns_lock and self._meta_lock.locked():
                 self._meta_lock.release()
@@ -1486,10 +1556,23 @@ class BrainStore:
         key = _dedupe_key(title, content, dedupe_key)
         manifest = await self._get_manifest()
         existing_id = (manifest.get('byDedupe') or {}).get(key)
+        if not existing_id and not dedupe_key and len(content) > 500:
+            # Earlier builds hashed just the first 500 characters. Verify the original before reusing it.
+            legacy_id = (manifest.get('byDedupe') or {}).get(_dedupe_key(title, content[:500], None))
+            legacy = await self.get_memory(legacy_id) if legacy_id else None
+            if legacy and legacy.get('content', '').casefold() == content[:50_000].casefold():
+                existing_id = legacy_id
         now = _now()
 
         if existing_id and not memory_id:
             existing = await self.get_memory(existing_id)
+            new_evidence = provenance or {}
+            if existing and new_evidence.get('captured') and new_evidence.get('supersedes'):
+                alias = existing['id'] == new_evidence['supersedes'] and existing.get('status') == 'approved'
+                revised = existing.get('status') == 'decayed' and str(existing.get('decayReason', '')).startswith('superseded by ')
+                if (alias and existing.get('content') != content) or revised:
+                    # A new assertion can restore a superseded value, retaining both earlier revisions.
+                    existing_id = existing = None
             if existing and existing.get('status') in ('decayed', 'rejected'):
                 # The owner already decided this. A re-proposal (even with approve=true) must not
                 # quietly reopen it. Different text, or a different dedupe_key, is a new memory.
@@ -1790,7 +1873,7 @@ use_meaning
             except Exception as exc:  # noqa: BLE001 - provider trouble must never break search
                 meaning = 'unavailable'
                 self._embed_down_until = time.monotonic() + EMBED_BREAKER_S
-                logging.getLogger('second_brain.embeddings').warning('meaning search failed: %s', type(exc).__name__)
+                logging.getLogger('braintwin.embeddings').warning('meaning search failed: %s', type(exc).__name__)
         wide = max(limit * 3, 30)  # room for the per-page cap below
         ranked = hybrid_rank(query, candidates, limit=wide, rank_index=rank_index)
         if cosines:
@@ -1889,7 +1972,7 @@ use_meaning
         try:
             found = await self.memory_search(title, limit=limit + 6)
         except Exception as exc:  # noqa: BLE001 - related links are a nicety; the memory itself still opens
-            logging.getLogger('second_brain.related').warning('related lookup failed: %s: %s', type(exc).__name__, str(exc)[:200])
+            logging.getLogger('braintwin.related').warning('related lookup failed: %s: %s', type(exc).__name__, str(exc)[:200])
             return []
         related: list[dict[str, Any]] = []
         for row in found.get('results') or []:
@@ -2302,6 +2385,7 @@ use_meaning
             decayReason=f"superseded by {rec['id']}",
         )
         await self._put_memory(old)
+        await self._cascade_children(old, 'decayed', now)
         if old.get('dedupeKey'):
             manifest = await self._get_manifest()
             by_dedupe = dict(manifest.get('byDedupe') or {})
@@ -2364,52 +2448,53 @@ use_meaning
         if owns_lock:
             await self._meta_lock.acquire()
         try:
-            rec = await self.get_memory(memory_id)
-            if not rec:
-                return {'ok': False, 'error': 'NOT_FOUND', 'message': f'No memory {memory_id}'}
-            if rec.get('status') not in ('approved', 'proposed'):
-                return {'ok': False, 'error': 'INVALID_STATE', 'message': 'Only approved or proposed memories can be edited.'}
-            new_title = (title if title is not None else str(rec.get('title') or '')).strip()
-            new_content = (content if content is not None else str(rec.get('content') or '')).strip()
-            if not new_title or not new_content:
-                return {'ok': False, 'error': 'INVALID_INPUT', 'message': 'title and content are required'}
-            new_tags = _clean_tags(tags) if tags is not None else list(rec.get('tags') or [])
-            new_type = (memory_type or str(rec.get('type') or 'note'))[:40]
-            before = (rec.get('title'), rec.get('content'), list(rec.get('tags') or []), rec.get('type'))
-            if before == (new_title[:500], new_content[:50_000], new_tags, new_type):
-                return {'ok': True, 'changed': False, 'memory': rec, 'message': 'Nothing changed.'}
-            text_changed = before[:2] != (new_title[:500], new_content[:50_000])
-            if text_changed:
-                key = _dedupe_key(new_title, new_content, None)
-                other = ((await self._get_manifest()).get('byDedupe') or {}).get(key)
-                if other and other != memory_id:
-                    return {'ok': False, 'error': 'DUPLICATE', 'message': 'Another memory already says exactly this.'}
-                rec['dedupeKey'] = key
-            now = _now()
-            rec.update(
-                {
-                    'title': new_title[:500],
-                    'content': new_content[:50_000],
-                    'summary': make_summary(new_content),
-                    'tags': new_tags,
-                    'type': new_type,
-                    'updatedAt': now,
-                    'editedAt': now,
-                }
-            )
-            await self._put_memory(rec)
-            await self.audit('edit', memory_id=memory_id, detail='owner_edit')
-            return {'ok': True, 'changed': True, 'memory': rec}
+            async with atomic_write(self._kv):
+                rec = await self.get_memory(memory_id)
+                if not rec:
+                    return {'ok': False, 'error': 'NOT_FOUND', 'message': f'No memory {memory_id}'}
+                if rec.get('status') not in ('approved', 'proposed'):
+                    return {'ok': False, 'error': 'INVALID_STATE', 'message': 'Only approved or proposed memories can be edited.'}
+                new_title = (title if title is not None else str(rec.get('title') or '')).strip()
+                new_content = (content if content is not None else str(rec.get('content') or '')).strip()
+                if not new_title or not new_content:
+                    return {'ok': False, 'error': 'INVALID_INPUT', 'message': 'title and content are required'}
+                new_tags = _clean_tags(tags) if tags is not None else list(rec.get('tags') or [])
+                new_type = (memory_type or str(rec.get('type') or 'note'))[:40]
+                before = (rec.get('title'), rec.get('content'), list(rec.get('tags') or []), rec.get('type'))
+                if before == (new_title[:500], new_content[:50_000], new_tags, new_type):
+                    return {'ok': True, 'changed': False, 'memory': rec, 'message': 'Nothing changed.'}
+                text_changed = before[:2] != (new_title[:500], new_content[:50_000])
+                if text_changed:
+                    key = _dedupe_key(new_title, new_content, None)
+                    other = ((await self._get_manifest()).get('byDedupe') or {}).get(key)
+                    if other and other != memory_id:
+                        return {'ok': False, 'error': 'DUPLICATE', 'message': 'Another memory already says exactly this.'}
+                    rec['dedupeKey'] = key
+                now = _now()
+                rec.update(
+                    {
+                        'title': new_title[:500],
+                        'content': new_content[:50_000],
+                        'summary': make_summary(new_content),
+                        'tags': new_tags,
+                        'type': new_type,
+                        'updatedAt': now,
+                        'editedAt': now,
+                    }
+                )
+                await self._put_memory(rec)
+                await self.audit('edit', memory_id=memory_id, detail='owner_edit')
+                return {'ok': True, 'changed': True, 'memory': rec}
         finally:
             if owns_lock and self._meta_lock.locked():
                 self._meta_lock.release()
 
-    async def export_memories(self, statuses: list[str] | None = None, *, limit: int = 5000) -> dict[str, Any]:
+    async def export_memories(self, statuses: list[str] | None = None, *, limit: int | None = None) -> dict[str, Any]:
         """Full records for the owner's own backup. Read only."""
         entries = await self._current_index_entries()
         allowed = {str(x) for x in statuses} if statuses else {'approved'}
         ids = [mid for mid, e in entries.items() if isinstance(e, dict) and e.get('status') in allowed]
-        truncated = len(ids) > limit
+        truncated = limit is not None and len(ids) > limit
         ids = ids[:limit]
         out: list[dict[str, Any]] = []
         for start in range(0, len(ids), 20):
@@ -2495,7 +2580,7 @@ _brain_lock = asyncio.Lock()
 
 
 async def get_brain(default_backend: str = BACKEND_ACTOR) -> BrainStore:
-    """Process-wide singleton. Backend: SECOND_BRAIN_BACKEND env, else `default_backend`."""
+    """Process-wide singleton. Backend: BRAINTWIN_BACKEND env, else `default_backend`."""
     global _brain
     if _brain is not None:
         return _brain
@@ -2512,4 +2597,4 @@ def _server_may_approve() -> bool:
     """True when this process was started with the approval mode that lets the owner's rules approve."""
     import os
 
-    return (os.environ.get('SECOND_BRAIN_APPROVAL') or '').strip().lower() == 'auto'
+    return (env_value('BRAINTWIN_APPROVAL') or '').strip().lower() == 'auto'

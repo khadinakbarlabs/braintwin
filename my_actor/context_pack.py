@@ -10,9 +10,11 @@ as a short block the agent can paste into its prompt. Reads only; nothing is cha
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
-from .brain import BrainStore
+from .brain import BrainStore, scope_tag_for
+from .exact_recall import by_phrase, evidence_line
 from .follow import recent_followed
 from .origin import origin_tag
 from .purpose import GROUP_HEADINGS, GROUP_ORDER, purpose_of
@@ -47,9 +49,36 @@ async def build_context(
     scope: str | None = None,
     include_followed: bool = True,
     max_items: int = 8,
+    targeted: bool = False,
 ) -> dict[str, Any]:
     budget_chars = min(max(int(token_budget or 1500), MIN_BUDGET), MAX_BUDGET) * CHARS_PER_TOKEN
     max_items = min(max(int(max_items or 8), 1), 20)
+    # Issue IDs and quoted strings carry more information than surrounding question words.
+    literal = re.search(r'"([^"\n]{2,120})"|\b([A-Z][A-Z0-9]{1,12}-[0-9]{1,12})\b', query or '') if targeted else None
+    if targeted and query.strip():
+        exact = await by_phrase(brain, literal.group(1) or literal.group(2), scope_tag_for(scope), max_items, '') if literal else {}
+        rows = exact.get('results') or []
+        if not rows:
+            hits = await brain.memory_search(query, scope=scope, limit=max_items)
+            rows = [hit['memory'] for hit in hits['results']]
+        if include_followed and not scope:
+            seen = {r['id'] for r in rows}
+            recent = await recent_followed(brain, days=7, limit=3)
+            rows.extend(r for r in recent['items'] if r['id'] not in seen)
+        lines = [FENCE]
+        items = []
+        used = len(FENCE)
+        truncated = bool(exact.get('nextAfter'))
+        for row in rows:
+            line = _one_line(evidence_line(row))
+            if len(items) >= max_items or used + len(line) + 1 > budget_chars:
+                truncated = True
+                continue
+            items.append({'id': row['id']})
+            lines.append(line)
+            used += 1 + len(line)
+        return {'context': '\n'.join(lines) if items else '', 'count': len(items), 'items': items,
+                'approxTokens': used // CHARS_PER_TOKEN if items else 0, 'truncated': truncated}
     profile = await brain.profile_cards(limit=5, scope=scope)
     search = await brain.memory_search(query, limit=max_items, scope=scope) if (query or '').strip() else {'results': []}
     profile_ids = {c['id'] for c in profile}
@@ -69,7 +98,7 @@ async def build_context(
             )
         )
     sections: list[tuple[str, list[tuple[str, dict[str, Any]]]]] = [(GROUP_HEADINGS[g], grouped[g]) for g in GROUP_ORDER]
-    if include_followed:
+    if include_followed and not scope:
         followed = await recent_followed(brain, days=7, limit=3)
         sections.append(
             (
@@ -89,17 +118,17 @@ async def build_context(
         if not rows:
             continue
         head = f'{heading}:'
-        if used + len(head) + 1 > budget_chars:
-            truncated = True
-            break
-        out_lines.append(head)
-        used += len(head) + 1
+        added_heading = False
         for text, meta in rows:
-            if used + len(text) + 1 > budget_chars:
+            extra = len(text) + 1 + (0 if added_heading else len(head) + 1)
+            if len(items) >= max_items or used + extra > budget_chars:
                 truncated = True
-                break
+                continue
+            if not added_heading:
+                out_lines.append(head)
+                added_heading = True
             out_lines.append(text)
-            used += len(text) + 1
+            used += extra
             items.append(meta)
     return {
         'ok': True,
@@ -107,7 +136,7 @@ async def build_context(
         'context': '\n'.join(out_lines) if items else '',
         'items': items,
         'count': len(items),
-        'approxTokens': used // CHARS_PER_TOKEN,
+        'approxTokens': used // CHARS_PER_TOKEN if items else 0,
         'tokenBudget': budget_chars // CHARS_PER_TOKEN,
         'truncated': truncated,
         'scorer': SCORER,

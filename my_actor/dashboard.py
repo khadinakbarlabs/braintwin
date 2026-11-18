@@ -11,7 +11,7 @@ What it can do, with the same rules and the same charges as the MCP tools:
            that really changed something, same `tool-call` event as the tools)
 
 Owner-level approval lives here on purpose (the dashboard is the human side of the inbox). Turn the
-whole thing off with SECOND_BRAIN_DASHBOARD=off.
+whole thing off with BRAINTWIN_DASHBOARD=off.
 """
 
 from __future__ import annotations
@@ -25,9 +25,10 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse, Response
+from starlette.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from .brand import env_value
 from .settings import KEY_EMBEDDINGS as KEY_USER_EMBEDDINGS
 from .notion import notion_status, notion_sync, set_notion_token, token_problem
 from . import digest
@@ -35,6 +36,7 @@ from . import builtin_ai
 from .autopilot import auto_status, set_follow_daily
 from .settings import on_platform as on_platform  # noqa: PLC0414
 from .capture import extract_candidates
+from .move import backup_json
 from .dashboard_page import render_page
 from .follow import follow_add, follow_list, follow_memory_ids, follow_remove, follow_sync, follow_update
 from .import_memories import text_to_records
@@ -51,7 +53,7 @@ MAX_TAG_CHARS = 40
 ALLOWED_STATUSES = ('approved', 'proposed', 'decayed', 'rejected')
 ALLOWED_TYPES = ('note', 'preference', 'fact', 'decision', 'person', 'project', 'procedure')
 
-log = logging.getLogger('second_brain.dashboard')
+log = logging.getLogger('braintwin.dashboard')
 MAX_QUERY = 300
 MAX_TARGET = 500
 MAX_FORGET_WITH_SOURCE = 300  # a click must answer in time; the rest stay and can be cleared by hand
@@ -63,7 +65,7 @@ Charger = Callable[[], Awaitable[None]]
 
 
 def dashboard_enabled() -> bool:
-    return (os.environ.get('SECOND_BRAIN_DASHBOARD') or 'on').strip().lower() not in ('off', '0', 'false', 'no')
+    return (env_value('BRAINTWIN_DASHBOARD') or 'on').strip().lower() not in ('off', '0', 'false', 'no')
 
 
 def dashboard_key() -> str:
@@ -195,10 +197,9 @@ class DashboardMiddleware:
     @staticmethod
     async def _export(brain: Any, status: Any) -> Response:
         statuses = [x for x in str(status or 'approved').split(',') if x in ALLOWED_STATUSES] or ['approved']
-        data = await brain.export_memories(statuses)
-        return JSONResponse(
-            data,
-            headers={'Cache-Control': 'no-store', 'Content-Disposition': 'attachment; filename="second-brain-export.json"'},
+        return StreamingResponse(
+            backup_json(brain, statuses, {}), media_type='application/json',
+            headers={'Cache-Control': 'no-store', 'Content-Disposition': 'attachment; filename="braintwin-export.json"'},
         )
 
     async def _api(self, request: Request, name: str, method: str) -> Response:

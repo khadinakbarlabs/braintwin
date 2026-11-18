@@ -8,6 +8,7 @@ from collections import Counter
 from typing import Any
 
 from .constants import INDEX_TOKEN_CHARS, SUMMARY_CHARS
+from .exact_recall import term_filter
 from .origin import card_fields, origin_brief
 from .purpose import purpose_fields
 
@@ -95,7 +96,7 @@ def card_from_index_entry(entry: dict[str, Any], *, snippet_chars: int = 240) ->
         'summary': summary,
         'tags': list(entry.get('tags') or []),
         'confidence': entry.get('confidence'),
-        'citations': [{'url': u} for u in uris],
+        'citations': [{'url': u} for u in uris] or ([entry['sourceRef']] if entry.get('sourceRef') else []),
         'updatedAt': entry.get('updatedAt'),
         'approvedAt': entry.get('approvedAt'),
         **purpose_fields(entry.get('type'), entry.get('tags')),
@@ -107,12 +108,15 @@ def index_entry_from_record(record: dict[str, Any]) -> dict[str, Any]:
     """Thin search-index row stored under __search_index."""
     content = str(record.get('content') or '')
     summary = str(record.get('summary') or '') or make_summary(content)
+    refs = [c for c in record.get('citations') or [] if isinstance(c, dict) and c.get('type') in ('chat', 'file')]
     return {
+        **({'sourceRef': refs[0]} if refs else {}),
         'id': record.get('id'),
         'status': record.get('status'),
         'type': record.get('type') or 'note',
         'title': record.get('title') or '',
         'summary': summary,
+        **({'bodyFilter': term_filter(content) if content.isascii() else ''} if content and content != summary else {}),
         'tags': list(record.get('tags') or []),
         'dedupeKey': record.get('dedupeKey') or '',
         'confidence': record.get('confidence'),

@@ -4,8 +4,8 @@ Run:  python -m my_actor.stdio
 Each agent (Cursor, Claude, Codex, OpenCode…) launches its own copy of this process; they
 all read and write the same store, so memory is shared with no always-on server and no cost.
 
-Storage defaults to a local SQLite file (~/.second-brain/brain.sqlite, owner-only). Set
-SECOND_BRAIN_BACKEND=apify (plus APIFY_TOKEN) to share the same brain across machines through
+Storage defaults to a local SQLite file (~/.local/share/braintwin/brain.sqlite, owner-only). Set
+BRAINTWIN_BACKEND=apify (plus APIFY_TOKEN) to share the same brain across machines through
 your own Apify named storages instead. Billing is a no-op here: local use is free.
 
 stdout carries the MCP protocol, so this module must never print to it.

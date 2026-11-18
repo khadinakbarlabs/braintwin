@@ -44,9 +44,57 @@ Use the full path the installer printed, not `~`:
 command = "/FULL/PATH/TO/.braintwin/venv/bin/braintwin"
 ```
 
+## Save automatically
+
+The installer prints the setup for Claude Code, Codex and Cursor. Add the matching
+snippet to your existing settings and keep your other hooks. Replace
+`/FULL/PATH/TO/.braintwin/venv/bin/braintwin-cli` with the path from the installer.
+These hooks keep facts from your typed prompts in the local database. They use
+built-in rules and read neither replies nor attachments. Session start gives the
+selected AI tool a short set of relevant memories.
+
+**Claude Code** (`~/.claude/settings.json`):
+
+```json
+{
+  "hooks": {
+    "SessionStart": [{ "hooks": [{ "type": "command", "command": "'/FULL/PATH/TO/.braintwin/venv/bin/braintwin-cli' hook session-start --client claude-code" }] }],
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "'/FULL/PATH/TO/.braintwin/venv/bin/braintwin-cli' hook prompt --client claude-code" }] }]
+  }
+}
+```
+
+**Codex** (`~/.codex/hooks.json`):
+
+```json
+{
+  "hooks": {
+    "SessionStart": [{ "hooks": [{ "type": "command", "command": "'/FULL/PATH/TO/.braintwin/venv/bin/braintwin-cli' hook session-start --client codex" }] }],
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "'/FULL/PATH/TO/.braintwin/venv/bin/braintwin-cli' hook prompt --client codex" }] }]
+  }
+}
+```
+
+After adding the commands, review and trust them with `/hooks` in Codex.
+
+**Cursor** (`~/.cursor/hooks.json`):
+
+```json
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [{ "command": "'/FULL/PATH/TO/.braintwin/venv/bin/braintwin-cli' hook session-start --client cursor" }],
+    "beforeSubmitPrompt": [{ "command": "'/FULL/PATH/TO/.braintwin/venv/bin/braintwin-cli' hook prompt --client cursor" }]
+  }
+}
+```
+
+To turn automatic saving off, remove the Braintwin prompt hook from that tool's
+settings. Remove the session-start hook too if you want to stop loading memories.
+
 ## Where your memory lives
 
-`~/.second-brain/brain.sqlite`, readable only by you. Set `SECOND_BRAIN_SQLITE` to use a
+`~/.local/share/braintwin/brain.sqlite`, readable only by you. Set `BRAINTWIN_SQLITE` to use a
 different file (use the same value in every tool).
 
 ## Useful commands
@@ -76,9 +124,13 @@ is free.
 ## Update or remove
 
 - Update: run the install command again.
-- Remove: delete `~/.braintwin`. Your memories stay in `~/.second-brain` until you delete
+- Remove: delete `~/.braintwin`. Your memories stay in `~/.local/share/braintwin` until you delete
   that folder too.
 
 ## Licence
 
 MIT. See `LICENSE`.
+
+Existing installations keep using their existing database. Earlier configuration names remain supported. An explicit `BRAINTWIN_SQLITE` path takes precedence.
+
+For a question about earlier work, call `memory_context` with `compact=true` and the project scope. To verify a detail, call `memory_search` with a quoted phrase or the returned memory ID and `compact=true`. Use the returned continuation to read more.

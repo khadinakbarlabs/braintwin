@@ -22,7 +22,7 @@ from urllib.parse import parse_qs, urlparse
 
 import httpx
 
-logger = logging.getLogger('apify.second_brain.youtube')  # under the SDK's logger so it shows in the run log
+logger = logging.getLogger('apify.braintwin.youtube')  # under the SDK's logger so it shows in the run log
 PLAYER_URL = 'https://www.youtube.com/youtubei/v1/player?prettyPrint=false'
 MAX_RESPONSE_BYTES = 3_000_000
 MAX_TRANSCRIPT_CHARS = 50_000

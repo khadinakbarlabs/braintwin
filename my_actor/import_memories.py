@@ -256,7 +256,9 @@ def normalize_plugin_export(
         return parsed
 
     payload = parsed['payload']
-    fmt = detect_format(payload)
+    from .chat_import import extract_chat_records
+    chat_rows = extract_chat_records(payload)
+    fmt = 'chat' if chat_rows is not None else detect_format(payload)
     if fmt == 'unknown':
         return {
             'ok': False,
@@ -282,10 +284,10 @@ def normalize_plugin_export(
         if fmt == 'mem0'
         else 'basic_memory'
         if fmt == 'basic_memory'
-        else 'generic'
+        else 'chat' if fmt == 'chat' else 'generic'
     )
 
-    items = _items_from_payload(payload, fmt)
+    items = chat_rows if chat_rows is not None else _items_from_payload(payload, fmt)
     records: list[dict[str, Any]] = []
     skipped = 0
     for item in items:
@@ -347,6 +349,10 @@ def text_to_records(text: str) -> list[dict[str, Any]]:
     Headings (`# ...`) are skipped. Nothing here calls an AI.
     """
     text = (text or '')[:MAX_TEXT_CHARS].replace('\r\n', '\n').replace('\r', '\n')
+    from .capture import extract_candidates, user_turns
+    turns = user_turns(text)
+    if turns is not None:
+        return [candidate for turn in turns for candidate in extract_candidates(turn)][:MAX_TEXT_ITEMS]
     lines = [ln.rstrip() for ln in text.split('\n')]
     lines = [ln for ln in lines if not ln.lstrip().startswith('#')]
     has_bullets = sum(1 for ln in lines if _BULLET_RE.match(ln)) >= 2

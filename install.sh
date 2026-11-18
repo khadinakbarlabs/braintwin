@@ -40,12 +40,13 @@ mkdir -p "$HOME_DIR"
 BIN="$HOME_DIR/venv/bin/braintwin"
 [ -x "$BIN" ] || fail "the install finished but $BIN is missing."
 
+MEMORY_PATH=$("$HOME_DIR/venv/bin/python" -c 'from my_actor.storage import default_sqlite_path; print(default_sqlite_path())')
 cat <<EOF
 
 Braintwin is installed.
 
 Your memories live in one private file on this computer:
-  ~/.second-brain/brain.sqlite
+  $MEMORY_PATH
 
 Connect an AI tool (pick yours):
 
@@ -61,17 +62,37 @@ Connect an AI tool (pick yours):
 
 Restart the tool after adding it.
 
-Save automatically (Claude Code), so saving never depends on the AI choosing to:
-  Add this to ~/.claude/settings.json (merge with any "hooks" you already have):
-    { "hooks": {
-        "SessionStart":     [ { "hooks": [ { "type": "command", "command": "$HOME_DIR/venv/bin/braintwin-cli hook session-start" } ] } ],
-        "UserPromptSubmit": [ { "hooks": [ { "type": "command", "command": "$HOME_DIR/venv/bin/braintwin-cli hook prompt" } ] } ] } }
-  It files lasting preferences and decisions you type, and starts each session with your memory.
-  It never reads the AI's replies and never makes a paid call. (Codex and Cursor: not set up yet.)
+Save automatically with Claude Code, Codex or Cursor:
+  Merge the matching snippet below with the hooks you already use.
+  After adding Codex hooks, review and trust the new commands in /hooks.
+  Hooks use the local memory file and only look for lasting facts in your typed prompts.
 
+EOF
+
+"$HOME_DIR/venv/bin/python" - "$HOME_DIR/venv/bin/braintwin-cli" <<'PYTHON'
+import json
+import shlex
+import sys
+
+binary = shlex.quote(sys.argv[1])
+for client, path, start, prompt in (
+    ('claude-code', '~/.claude/settings.json', 'SessionStart', 'UserPromptSubmit'),
+    ('codex', '~/.codex/hooks.json', 'SessionStart', 'UserPromptSubmit'),
+    ('cursor', '~/.cursor/hooks.json', 'sessionStart', 'beforeSubmitPrompt'),
+):
+    config = {'version': 1} if client == 'cursor' else {}
+    hooks = {}
+    for name, event in ((start, 'session-start'), (prompt, 'prompt')):
+        command = {'command': f'{binary} hook {event} --client {client}'}
+        hooks[name] = [command] if client == 'cursor' else [{'hooks': [{'type': 'command', **command}]}]
+    config['hooks'] = hooks
+    print(f'  {path}\n{json.dumps(config, indent=2)}\n')
+PYTHON
+
+cat <<EOF
 Check it works:
   $HOME_DIR/venv/bin/braintwin-cli health
 
 Update later: run this installer again.
-Remove: delete $HOME_DIR (your memories stay in ~/.second-brain).
+Remove: delete $HOME_DIR (your memories are stored at $MEMORY_PATH).
 EOF

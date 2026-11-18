@@ -6,13 +6,16 @@ every copied memory remembers the id it had where it came from.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import tempfile
+from datetime import UTC, datetime
 import os
 from pathlib import Path
 from typing import Any
 
 from .brain import BrainStore
-from .constants import BACKEND_APIFY
+from .constants import BACKEND_APIFY, MEMORY_PREFIX
 
 SOURCE_NAME = 'braintwin'  # the "plugin" name our own export file is imported under
 CHUNK = 200  # one import call never writes more than this
@@ -29,15 +32,40 @@ def _portable(memory: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+async def backup_json(brain: BrainStore, statuses: list[str], totals: dict):
+    """Enumerate canonical records, including ones absent from a damaged derived index."""
+    keys = await brain.kv.list_keys(MEMORY_PREFIX)
+    stamp = datetime.now(UTC).isoformat()
+    yield '{"ok":true,"exportedAt":' + json.dumps(stamp) + ',"memories":['
+    count = 0
+    for start in range(0, len(keys), 20):
+        rows = await asyncio.gather(*(brain.kv.get_value(k) for k in keys[start:start + 20]))
+        for row in rows:
+            if isinstance(row, dict) and row.get('status') in statuses:
+                yield (',' if count else '') + json.dumps(row, ensure_ascii=False)
+                count += 1
+    totals['count'] = count
+    yield '],"count":' + str(count) + ',"truncated":false}'
+
+
 async def export_to_file(brain: BrainStore, path: Path, *, everything: bool = False) -> dict[str, Any]:
     statuses = ['approved', 'proposed', 'rejected', 'decayed'] if everything else ['approved']
-    data = await brain.export_memories(statuses)
+    temporary = None
+    totals = {}
     try:
-        path.write_text(json.dumps(data, indent=2, default=str, ensure_ascii=False), encoding='utf-8')
-        os.chmod(path, 0o600)  # a whole memory is private
+        with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=path.parent, delete=False) as out:
+            temporary = Path(out.name)
+            async for chunk in backup_json(brain, statuses, totals):
+                out.write(chunk)
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(temporary, path)
     except OSError as exc:
         return {'ok': False, 'error': 'FILE_ERROR', 'message': f'Cannot write {path}: {exc}'}
-    return {'ok': True, 'file': str(path), 'count': data.get('count', 0), 'truncated': bool(data.get('truncated'))}
+    finally:
+        if temporary:
+            temporary.unlink(missing_ok=True)
+    return {'ok': True, 'file': str(path), 'count': totals['count'], 'truncated': False}
 
 
 async def copy_memories(source: BrainStore, target: BrainStore, *, dry_run: bool = False) -> dict[str, Any]:

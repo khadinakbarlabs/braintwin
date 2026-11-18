@@ -285,7 +285,7 @@ function exportAll(btn){
   if(HOSTED){init.method='POST';init.headers['Content-Type']='application/json';init.body=JSON.stringify({status:state.status,_dash:1,_key:KEY||undefined});}
   else if(KEY)init.headers['X-Dashboard-Key']=KEY;
   fetch(BASE+'/api/export'+(HOSTED?'':'?status='+encodeURIComponent(state.status)),init).then(function(r){if(r.status===403)throw new Error('key');if(!r.ok)throw new Error('x');return r.blob();}).then(function(b){
-    var a=h('a',{href:URL.createObjectURL(b),download:'second-brain-'+state.status+'.json'});document.body.appendChild(a);a.click();
+    var a=h('a',{href:URL.createObjectURL(b),download:'braintwin-'+state.status+'.json'});document.body.appendChild(a);a.click();
     setTimeout(function(){URL.revokeObjectURL(a.href);document.body.removeChild(a);},1000);btn.disabled=false;toast('Export downloaded');
   }).catch(function(e){btn.disabled=false;toast('Export failed',true);});
 }
@@ -493,7 +493,16 @@ function viewConnect(){
 
 function viewImport(){
   var box=h('div');main.textContent='';main.appendChild(box);
-  box.appendChild(h('p',{class:'note',text:'Paste what another AI tool already knows about you, one memory per line. Preview is free. Saving costs $0.01 in total, however many items.'}));
+  var prompt='List the lasting facts, preferences and decisions about me that you remember or can see in your saved memory. Use a bullet list with one memory per line, each starting with "- ". Include only details you already know. Leave out passwords, API keys and sensitive personal information. If you have no saved memories you can access, say so.';
+  var copy=h('button',{class:'btn ghost',type:'button',text:'Copy prompt',onclick:function(){copyText(prompt,copy);}});
+  box.appendChild(h('section',{class:'card'},
+    h('h2',{text:'Bring your memory from ChatGPT, Claude or Gemini'}),
+    h('ol',{},
+      h('li',{},'Open a chat with the assistant you use and send this prompt.',
+        h('pre',{class:'snip',text:prompt}),copy),
+      h('li',{text:'Review the reply. Remove anything private, incorrect or out of date, then paste the list below.'}),
+      h('li',{text:'Choose Preview to check the list, then choose Import to save it to your inbox.'}))));
+  box.appendChild(h('p',{class:'note',text:'Preview is free. Saving costs $0.01 in total, however many items.'}));
   var text=h('textarea',{required:true,name:'text',placeholder:'- I prefer short answers\n- My company is called ...\n\nor paste an export file here'});
   var file=h('input',{type:'file',accept:'.json,.txt,.md,application/json,text/plain'});
   file.addEventListener('change',function(){var f=file.files&&file.files[0];if(!f)return;if(f.size>900000){toast('That file is too big (900 KB max). Split it.',true);return;}var rd=new FileReader();rd.onload=function(){text.value=String(rd.result||'');};rd.readAsText(f);});

@@ -35,7 +35,7 @@ MAX_PROFILE = 12
 REQUEST_TIMEOUT_S = 40.0
 MAX_OUT_TOKENS = 900
 
-logger = logging.getLogger('apify.second_brain.digest')
+logger = logging.getLogger('apify.braintwin.digest')
 
 _SYSTEM = (
     'You write a short personal learning digest. You get (1) a PROFILE: facts and preferences of one person, '

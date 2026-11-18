@@ -1,6 +1,6 @@
-"""Fixed store names, key prefixes and tunables for the personal second brain."""
+"""Fixed store names, key prefixes and tunables for the personal Braintwin store."""
 
-VERSION = '0.28.0'
+VERSION = '0.30.0'
 
 KV_STORE_NAME = 'braintwin-kv'
 AUDIT_DATASET_NAME = 'braintwin-audit'
@@ -56,20 +56,20 @@ BACKEND_ACTOR = 'actor'  # Apify Actor runtime (Standby / normal run)
 BACKEND_APIFY = 'apify'  # Apify REST API from a local process (needs APIFY_TOKEN)
 BACKEND_SQLITE = 'sqlite'  # local file, $0, shared by every agent on this machine
 BACKENDS = (BACKEND_ACTOR, BACKEND_APIFY, BACKEND_SQLITE)
-ENV_BACKEND = 'SECOND_BRAIN_BACKEND'
-ENV_SQLITE_PATH = 'SECOND_BRAIN_SQLITE'
-ENV_LOCAL = 'SECOND_BRAIN_LOCAL'  # 1 → force sqlite
-DEFAULT_SQLITE_PATH = '~/.second-brain/brain.sqlite'
+ENV_BACKEND = 'BRAINTWIN_BACKEND'
+ENV_SQLITE_PATH = 'BRAINTWIN_SQLITE'
+ENV_LOCAL = 'BRAINTWIN_LOCAL'  # 1 → force sqlite
+DEFAULT_SQLITE_PATH = '~/.local/share/braintwin/brain.sqlite'
 
 # Ingest
 INGEST_INLINE = 'inline'  # fetch during the tool call (local stdio: no hot-path cost)
 INGEST_QUEUE = 'queue'  # enqueue only; a worker fetches (Standby: keep the server idle)
-ENV_INGEST_MODE = 'SECOND_BRAIN_INGEST'
+ENV_INGEST_MODE = 'BRAINTWIN_INGEST'
 MAX_QUEUE_JOBS = 200
 MAX_JOB_ATTEMPTS = 3
 
 # Owned-Actor scrape bridge (human-triggered only; never exposed as an MCP tool)
-ENV_OWNED_ACTOR_OWNER = 'SECOND_BRAIN_OWNED_ACTOR_OWNER'
+ENV_OWNED_ACTOR_OWNER = 'BRAINTWIN_OWNED_ACTOR_OWNER'
 DEFAULT_OWNED_ACTOR_OWNER = 'khadinakbar'
 MAX_SCRAPE_COST_USD = 5.0
 MAX_SCRAPE_ITEMS = 50
@@ -92,7 +92,7 @@ MAX_DRAIN_BUDGET_USD = 10.0
 # Who may approve memories. "agent" (default): the connected agent can call inbox_approve /
 # approve=true. "human": those are refused server-side; only the CLI can approve.
 # "auto": agents may propose; the server approves only proposals that pass the owner's policy.
-ENV_APPROVAL = 'SECOND_BRAIN_APPROVAL'
+ENV_APPROVAL = 'BRAINTWIN_APPROVAL'
 APPROVAL_AGENT = 'agent'
 APPROVAL_HUMAN = 'human'
 APPROVAL_AUTO = 'auto'  # the server approves by the owner's policy (see policy.py)

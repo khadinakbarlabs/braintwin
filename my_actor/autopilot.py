@@ -26,7 +26,7 @@ FOLLOW_EVERY = timedelta(hours=24)
 DRAIN_LIMIT = 5
 ITEMS_PER_FEED = 5
 
-logger = logging.getLogger('second_brain.autopilot')
+logger = logging.getLogger('braintwin.autopilot')
 
 
 async def auto_status(brain: Any) -> dict[str, Any]:

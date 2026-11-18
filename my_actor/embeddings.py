@@ -7,10 +7,10 @@ means memory titles and summaries are SENT to that API, and you pay that provide
 is never on by default.
 
 Turn on (all three needed; the key is a private secret, never an input):
-  SECOND_BRAIN_EMBEDDINGS_URL    https base of an OpenAI-compatible API, e.g. https://api.openai.com/v1
-  SECOND_BRAIN_EMBEDDINGS_MODEL  model name, e.g. text-embedding-3-small
-  SECOND_BRAIN_EMBEDDINGS_KEY    the API key
-  SECOND_BRAIN_EMBEDDINGS_DIMS   optional; shorter vectors are cheaper to store (model must support it)
+  BRAINTWIN_EMBEDDINGS_URL    https base of an OpenAI-compatible API, e.g. https://api.openai.com/v1
+  BRAINTWIN_EMBEDDINGS_MODEL  model name, e.g. text-embedding-3-small
+  BRAINTWIN_EMBEDDINGS_KEY    the API key
+  BRAINTWIN_EMBEDDINGS_DIMS   optional; shorter vectors are cheaper to store (model must support it)
 
 Behaviour: vectors are stored in your key-value store (`__embeddings`) and filled in lazily, a
 small batch per search. If the API fails or is slow, search silently falls back to the normal
@@ -18,6 +18,7 @@ ranking. Nothing here is charged by this Actor.
 """
 
 from __future__ import annotations
+from .brand import env_value
 
 import asyncio
 import base64
@@ -65,15 +66,15 @@ class EmbeddingConfig:
 def embedding_config(env: dict[str, str] | None = None) -> EmbeddingConfig | None:
     """Read the owner's settings. Returns None (feature off) unless all three required are present."""
     e = env if env is not None else dict(os.environ)
-    url = (e.get('SECOND_BRAIN_EMBEDDINGS_URL') or '').strip().rstrip('/')
-    model = (e.get('SECOND_BRAIN_EMBEDDINGS_MODEL') or '').strip()
-    key = (e.get('SECOND_BRAIN_EMBEDDINGS_KEY') or '').strip()
+    url = (env_value('BRAINTWIN_EMBEDDINGS_URL', e) or '').strip().rstrip('/')
+    model = (env_value('BRAINTWIN_EMBEDDINGS_MODEL', e) or '').strip()
+    key = (env_value('BRAINTWIN_EMBEDDINGS_KEY', e) or '').strip()
     if not (url and model and key):
         return None
     parsed = urlparse(url)
     if parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
         return None  # https only; no credentials, query or fragment inside the address
-    dims_raw = (e.get('SECOND_BRAIN_EMBEDDINGS_DIMS') or '').strip()
+    dims_raw = (env_value('BRAINTWIN_EMBEDDINGS_DIMS', e) or '').strip()
     dims = int(dims_raw) if dims_raw.isdigit() and 16 <= int(dims_raw) <= 3072 else None
     return EmbeddingConfig(url=url, model=model, key=key, dims=dims)
 

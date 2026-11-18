@@ -277,6 +277,8 @@ async def fetch_landing_page(url: str) -> dict[str, Any]:
         'title': title[:300],
         'text': plain,
         'charCount': len(plain),
+        'inputLimitReached': (len(body) >= MAX_BYTES or len(plain) > MAX_TEXT_CHARS
+                              or (len(text_body) > MAX_PARSE_CHARS and ('html' in content_type or '<html' in text_body[:500].lower()))),
         'error': None if raw['_ok'] else 'HTTP_STATUS',
         'message': None if raw['_ok'] else f"Upstream returned HTTP {raw['_status']}",
     }
