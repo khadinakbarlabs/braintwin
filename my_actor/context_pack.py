@@ -16,7 +16,7 @@ from typing import Any
 from .brain import BrainStore, scope_tag_for
 from .exact_recall import by_phrase, evidence_line
 from .follow import recent_followed
-from .origin import origin_tag
+from .origin import Collection, infer_collection, origin_tag
 from .purpose import GROUP_HEADINGS, GROUP_ORDER, purpose_of
 from .ranking import SCORER
 
@@ -50,18 +50,23 @@ async def build_context(
     include_followed: bool = True,
     max_items: int = 8,
     targeted: bool = False,
+    collection: Collection | None = None,
 ) -> dict[str, Any]:
     budget_chars = min(max(int(token_budget or 1500), MIN_BUDGET), MAX_BUDGET) * CHARS_PER_TOKEN
     max_items = min(max(int(max_items or 8), 1), 20)
+    collection = collection or infer_collection(query)
     # Issue IDs and quoted strings carry more information than surrounding question words.
     literal = re.search(r'"([^"\n]{2,120})"|\b([A-Z][A-Z0-9]{1,12}-[0-9]{1,12})\b', query or '') if targeted else None
     if targeted and query.strip():
-        exact = await by_phrase(brain, literal.group(1) or literal.group(2), scope_tag_for(scope), max_items, '') if literal else {}
+        exact = (
+            await by_phrase(brain, literal.group(1) or literal.group(2), scope_tag_for(scope), max_items, '',
+                            collection=collection) if literal else {}
+        )
         rows = exact.get('results') or []
-        if not rows:
-            hits = await brain.memory_search(query, scope=scope, limit=max_items)
+        if not rows and not (literal and literal.group(1)):
+            hits = await brain.memory_search(query, scope=scope, limit=max_items, collection=collection)
             rows = [hit['memory'] for hit in hits['results']]
-        if include_followed and not scope:
+        if include_followed and not scope and collection is None and not literal:
             seen = {r['id'] for r in rows}
             recent = await recent_followed(brain, days=7, limit=3)
             rows.extend(r for r in recent['items'] if r['id'] not in seen)
@@ -79,8 +84,11 @@ async def build_context(
             used += 1 + len(line)
         return {'context': '\n'.join(lines) if items else '', 'count': len(items), 'items': items,
                 'approxTokens': used // CHARS_PER_TOKEN if items else 0, 'truncated': truncated}
-    profile = await brain.profile_cards(limit=5, scope=scope)
-    search = await brain.memory_search(query, limit=max_items, scope=scope) if (query or '').strip() else {'results': []}
+    profile = await brain.profile_cards(limit=5, scope=scope) if collection is None else []
+    search = (
+        await brain.memory_search(query, limit=max_items, scope=scope, collection=collection)
+        if (query or '').strip() else {'results': []}
+    )
     profile_ids = {c['id'] for c in profile}
     hits = [r for r in search.get('results', []) if r['memory']['id'] not in profile_ids]
 
@@ -90,7 +98,9 @@ async def build_context(
         grouped[group].append((_line(c['title'], c['summary'], c['id'], c.get('origin')), {'id': c['id'], 'from': 'profile', 'use': group}))
     for r in hits:
         card = r['memory']
-        group = purpose_of(card.get('type'), card.get('tags')).group
+        group = {'agent': 'note', 'reference': 'reference'}.get(card.get('collection'))
+        if not group:
+            group = purpose_of(card.get('type'), card.get('tags')).group
         grouped[group].append(
             (
                 _line(card['title'], card['summary'], card['id'], card.get('origin')),
@@ -98,7 +108,7 @@ async def build_context(
             )
         )
     sections: list[tuple[str, list[tuple[str, dict[str, Any]]]]] = [(GROUP_HEADINGS[g], grouped[g]) for g in GROUP_ORDER]
-    if include_followed and not scope:
+    if include_followed and not scope and collection is None:
         followed = await recent_followed(brain, days=7, limit=3)
         sections.append(
             (

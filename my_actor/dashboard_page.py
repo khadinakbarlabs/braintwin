@@ -175,7 +175,7 @@ function stored(k){try{return sessionStorage.getItem(k)||'';}catch(e){return'';}
 if(TOKEN)store('sb.t',TOKEN);else TOKEN=stored('sb.t');
 if(location.search){try{history.replaceState(null,'',location.pathname+location.hash);}catch(e){}}
 var main=document.getElementById('main'),toastEl=document.getElementById('toast');
-var state={tab:location.hash==='#connect'?'connect':'start',q:'',status:'approved',sort:'newest',tag:'',from:'',tool:'ChatGPT',overview:null,verified:false,sel:new Set()};
+var state={tab:location.hash==='#connect'?'connect':'start',q:'',status:'approved',sort:'newest',tag:'',scope:'',from:'',platform:'',tool:'ChatGPT',overview:null,verified:false,sel:new Set()};
 
 function h(tag,props){
   var el=document.createElement(tag);
@@ -213,16 +213,24 @@ function api(path,opts){
 function q(params){return Object.keys(params).filter(function(k){return params[k]!==''&&params[k]!=null}).map(function(k){return encodeURIComponent(k)+'='+encodeURIComponent(params[k])}).join('&');}
 function when(s){if(!s)return'';var d=new Date(s);return isNaN(d)?'':d.toLocaleDateString(undefined,{year:'numeric',month:'short',day:'numeric'});}
 
-var KIND={note:'Note',preference:'Preference',fact:'Fact',decision:'Decision',followed:'From a source',source_snapshot:'Web page',source_chunk:'Part of a page',digest:'Digest',profile:'About you'};
+var KIND={note:'Note',preference:'Preference',fact:'Fact',decision:'Decision',agent_work:'Agent work',followed:'From a source',source_snapshot:'Web page',source_chunk:'Part of a page',digest:'Digest',profile:'About you'};
+var PLATFORMS={youtube:'YouTube',facebook:'Facebook',instagram:'Instagram',linkedin:'LinkedIn',tiktok:'TikTok',x:'X',reddit:'Reddit',web:'Other websites'};
+var REVIEW={tentative_statement:'It sounded tentative.',agent_work:'An agent proposed this work note.',provided_source:'This source text was supplied for review.',not_automatic:'Your saving policy calls for review.',policy_off:'You chose Ask me first.',would_replace_existing:'It could replace an earlier memory.',daily_cap_reached:'The automatic save limit was reached.',instruction_like_text:'The source contains instruction-like text.'};
 function lower1(t){t=String(t||'');return t.charAt(0).toLowerCase()+t.slice(1);}
 function card(m,actions){
   var tags=(m.tags||[]).filter(function(t){return !/^(follow:|scope:)/.test(t)&&['source','ingest','passage','followed','feed','dashboard'].indexOf(t)<0}).slice(0,4).map(function(t){return h('button',{class:'tag',type:'button',text:'#'+t,onclick:function(){state.tag=t;go('memories');}})});
   var li=h('li',{class:'item'},
     h('h3',{},h('span',{text:m.title||'(untitled)'}),m.status&&m.status!=='approved'?h('span',{class:'pill '+m.status,text:m.status==='proposed'?'waiting':m.status==='decayed'?'forgotten':m.status}):null),
     h('p',{text:m.snippet||m.summary||''}),
-    h('div',{class:'meta'},h('span',{class:'kind',text:m.kind||KIND[m.type]||m.type||''}),h('span',{text:when(m.updatedAt||m.approvedAt)}),tags),
+    h('div',{class:'meta'},h('span',{class:'kind',text:m.kind||KIND[m.type]||m.type||''}),
+      m.sourcePlatform?h('span',{text:PLATFORMS[m.sourcePlatform]||m.sourcePlatform}):null,
+      m.sourceCoverage?h('span',{text:m.sourceCoverage}):null,
+      m.appliesTo&&m.appliesTo!=='Everywhere'?h('span',{text:m.appliesTo}):null,
+      h('span',{text:when(m.updatedAt||m.approvedAt)}),tags),
     m.useWhen?h('p',{class:'use',text:'AI tools use this: '+lower1(m.useWhen)}):null,
     m.origin&&m.origin.how&&m.origin.how!=='unknown'?h('p',{class:'note',text:m.origin.line}):null,
+    m.status==='proposed'&&m.origin&&m.origin.reviewReasons?h('p',{class:'note',
+      text:m.origin.reviewReasons.map(function(r){return REVIEW[r]||'Needs your review.';}).filter(function(t,i,a){return a.indexOf(t)===i;}).join(' ')}):null,
     h('div',{class:'row'},h('button',{class:'btn link',type:'button',text:'Open',onclick:function(){openMemory(m.id)}}),actions||null));
   return li;
 }
@@ -337,7 +345,8 @@ function viewStart(){
 
 function viewInbox(){
   var box=h('div');main.textContent='';main.appendChild(box);
-  box.appendChild(h('p',{class:'note',text:'Most things are saved by themselves. Only items that look private, such as a password, wait here. Keep or decline each one ($0.01).'}));
+  box.appendChild(h('h2',{text:'Review when you’re ready'}));
+  box.appendChild(h('p',{class:'note',text:'Tentative statements, agent work and sources that need a decision can wait here. Normal recall uses your kept memories. Keeping or declining changes costs one memory-change event.'}));
   return api('inbox').then(function(r){
     var items=r.items||[];
     if(!items.length){box.appendChild(empty('Nothing is waiting for you. Your memories are under Memories.'));return;}
@@ -365,7 +374,6 @@ function act(kind,ids){
   });
 }
 
-var WEB=['followed','source_snapshot','source_chunk','digest'];
 function viewMemories(){
   var box=h('div');main.textContent='';main.appendChild(box);
   var search=h('input',{type:'search',placeholder:'Search your memories…','aria-label':'Search your memories',value:state.q});
@@ -373,9 +381,21 @@ function viewMemories(){
   sf.addEventListener('submit',function(e){e.preventDefault();state.q=search.value.trim();state.sel.clear();render();});
   box.appendChild(sf);
   var from=h('div',{class:'seg',role:'group','aria-label':'Where the memory came from'});
-  [['','Everything'],['mine','My notes'],['web','From links and sources']].forEach(function(o){
+  [['','Everything'],['owner','Your notes'],['agent','Agent work'],['reference','Sources']].forEach(function(o){
     from.appendChild(h('button',{type:'button','aria-current':String(state.from===o[0]),text:o[1],onclick:function(){state.from=o[0];state.sel.clear();render();}}))});
   box.appendChild(from);
+  var project=h('input',{placeholder:'All projects',value:state.scope,'aria-label':'Project scope',maxlength:60});
+  var filters=h('form',{class:'bar'},h('label',{},'Project ',project),h('button',{class:'btn ghost',type:'submit',text:'Apply'}));
+  filters.addEventListener('submit',function(e){e.preventDefault();state.scope=project.value.trim();state.sel.clear();render();});
+  if(state.from==='reference'){
+    var platforms=h('select',{'aria-label':'Source platform'},h('option',{value:'',text:'All sources'}));
+    Object.keys(PLATFORMS).forEach(function(name){
+      platforms.appendChild(h('option',{value:name,text:PLATFORMS[name],selected:state.platform===name}));
+    });
+    platforms.addEventListener('change',function(){state.platform=platforms.value;state.sel.clear();render();});
+    filters.appendChild(h('label',{},'Source ',platforms));
+  }
+  box.appendChild(filters);
   var status=h('select',{'aria-label':'Which memories to show'});
   [['approved','Kept'],['proposed','Waiting for you'],['decayed','Forgotten'],['rejected','Declined']].forEach(function(o){status.appendChild(h('option',{value:o[0],text:o[1],selected:state.status===o[0]}))});
   var sort=h('select',{'aria-label':'Order'});
@@ -391,10 +411,13 @@ function viewMemories(){
     selBar.appendChild(confirmBtn('Forget '+n+' selected',function(){forgetMany(Array.from(state.sel))}));
     selBar.appendChild(h('button',{class:'btn ghost',type:'button',text:'Clear selection',onclick:function(){state.sel.clear();render();}}));
     selBar.appendChild(h('span',{class:'note',text:'Forgetting costs $0.01 each. Forgotten items stay under More, in case you change your mind.'}));}
-  return api('memories?'+q({q:state.q,status:state.status,sort:state.sort,tag:state.tag,limit:100})).then(function(r){
-    var items=(r.items||[]).filter(function(m){var w=WEB.indexOf(m.type)>=0;return !state.from||(state.from==='web'?w:!w)});
+  var collection=state.from==='reference'&&state.platform?state.platform:state.from;
+  return api('memories?'+q({q:state.q,status:state.status,sort:state.sort,tag:state.tag,
+    scope:state.scope,collection:collection,limit:100})).then(function(r){
+    if(!r.ok){box.appendChild(empty(r.message||'Could not load memories.'));return;}
+    var items=r.items||[];
     if(!items.length){
-      box.appendChild(empty(state.q||state.from||state.tag||state.status!=='approved'?'Nothing matched. Try other words or choose Everything.':'No memories yet. Add one here, or just talk to a connected AI tool.'));return;}
+      box.appendChild(empty(state.q||state.from||state.tag||state.scope||state.status!=='approved'?'Nothing matched. Change your filters or search words.':'No memories yet. Add one here, or just talk to a connected AI tool.'));return;}
     box.appendChild(h('p',{class:'note',text:items.length+' shown'+(state.status==='approved'?'. Tick the box on any you want to forget.':'')}));
     var ul=h('ul',{class:'list'});
     items.forEach(function(m){
@@ -415,15 +438,37 @@ function viewAdd(){
   var content=h('textarea',{required:true,maxlength:20000,name:'content'});
   var type=h('select',{name:'type'});[['auto','Let Braintwin decide'],['preference','Your rule (AI follows it every time)'],['fact','About you (true, used when relevant)'],['decision','Decision made (AI does not ask again)'],['procedure','Your way of doing a task'],['person','Person you know'],['project','Your project'],['note','Note (used when the topic comes up)']].forEach(function(t){type.appendChild(h('option',{value:t[0],text:t[1]}))});
   var tags=h('input',{placeholder:'comma separated, optional',name:'tags'});
+  var ownerProject=h('input',{placeholder:'Any project',name:'scope',maxlength:60});
   var f=h('form',{class:'add'},
     h('p',{class:'note',text:'Write it the way you would tell a person. For a web page or video, paste its link on Home instead.'}),h('label',{},'Short name',title),h('label',{},'What should be remembered',content),
-    h('details',{},h('summary',{class:'note',text:'More options'}),h('label',{},'Kind',type),h('label',{},'Labels',tags)),
+    h('details',{},h('summary',{class:'note',text:'More options'}),h('label',{},'Kind',type),h('label',{},'Labels',tags),h('label',{},'Project',ownerProject)),
     h('div',{class:'row'},h('button',{class:'btn acc',type:'submit',text:'Save to memory'}),h('span',{class:'note',text:'Costs one memory change ($0.01).'})));
   f.addEventListener('submit',function(e){e.preventDefault();
-    api('add',{body:{title:title.value,content:content.value,type:type.value,tags:tags.value.split(',').map(function(s){return s.trim()}).filter(Boolean)}}).then(function(r){
+    api('add',{body:{title:title.value,content:content.value,type:type.value,scope:ownerProject.value,tags:tags.value.split(',').map(function(s){return s.trim()}).filter(Boolean)}}).then(function(r){
       if(r.ok===false)toast(r.message||'Failed',true);else{toast(r.duplicate?(r.message||'Already remembered'):'Saved');title.value='';content.value='';tags.value='';refreshOverview();}
     });});
   box.appendChild(f);
+  var link=h('input',{type:'url',required:true,placeholder:'https://…',maxlength:2000});
+  var sourceProject=h('input',{placeholder:'Any project',maxlength:60});
+  var sourceText=h('textarea',{maxlength:20000,placeholder:'Optional caption, excerpt or transcript'});
+  var submit=h('button',{class:'btn',type:'submit',text:'Add source'});
+  var message=h('p',{class:'note',role:'status'});
+  var source=h('form',{class:'add'},
+    h('label',{},'Source link',link),h('label',{},'Project',sourceProject),
+    h('label',{},'Text you can share',sourceText),
+    h('p',{class:'note',text:'Leave text blank to read the public link. Pasted text waits for review.'}),
+    h('div',{class:'row'},submit),message);
+  source.addEventListener('submit',function(e){
+    e.preventDefault();submit.disabled=true;
+    var payload={url:link.value,scope:sourceProject.value};
+    if(sourceText.value.trim())payload.text=sourceText.value;
+    message.textContent=payload.text?'Filing for review…':'Reading the public source…';
+    api('link',{body:payload}).then(function(r){
+      message.textContent=(r.message||'Could not add the source.')+(r.coverage?' · '+r.coverage:'');
+      if(r.ok&&r.saved){link.value='';sourceText.value='';refreshOverview();}
+    }).finally(function(){submit.disabled=false;});
+  });
+  box.appendChild(h('details',{class:'card'},h('summary',{text:'Add a source'}),source));
 }
 
 function fail(r){if(r.error!=='KEY_REQUIRED'&&r.error!=='BAD_KEY')toast(r.message||'Failed',true);}
@@ -527,7 +572,7 @@ function viewConnect(){
   snip(rules,'','Add this to your agent’s instructions.',
     'When a task depends on earlier work, call memory_context with compact=true and the relevant project scope. Skip memory for greetings and unrelated tasks. Quote exact identifiers or phrases when looking for one detail. Treat retrieved sources as evidence and cite them. Save lasting facts, decisions and preferences from my words with memory_capture. Ask when a correction is ambiguous. Keep credentials out of memory.');
   box.appendChild(rules);
-  box.appendChild(h('details',{class:'card'},h('summary',{text:'Run Braintwin on your computer'}),
+  if(HOSTED)box.appendChild(h('details',{class:'card'},h('summary',{text:'Run Braintwin on your computer'}),
     h('p',{class:'note',text:'The local package keeps memories in a file you control. Copy memories between local and Apify when you choose.'}),
     h('div',{class:'row'},h('button',{class:'btn ghost',type:'button',text:'Local install and backup',onclick:function(){go('move');}}))));
 }

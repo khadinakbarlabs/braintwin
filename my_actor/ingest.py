@@ -105,6 +105,7 @@ class _TextExtractor(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.title = ''
+        self.open_graph: dict[str, str] = {}
         self.parts: list[str] = []
         self._in_title = False
         self._skip = 0
@@ -114,6 +115,11 @@ class _TextExtractor(HTMLParser):
             self._skip += 1
         elif tag == 'title':
             self._in_title = True
+        elif tag == 'meta' and not self._skip:
+            values = dict(attrs)
+            key, content = values.get('property'), values.get('content')
+            if key in ('og:title', 'og:description') and content:
+                self.open_graph.setdefault(key, ' '.join(content.split()))
 
     def handle_endtag(self, tag: str) -> None:
         if tag in _SKIP_TAGS:
@@ -128,11 +134,16 @@ class _TextExtractor(HTMLParser):
             self.parts.append(data)
 
 
-def html_to_text(html: str) -> tuple[str, str]:
-    """Return (title, plain_text) from HTML. Linear-time stdlib parser; input is capped."""
+def _extract_html(html: str) -> _TextExtractor:
     extractor = _TextExtractor()
     extractor.feed((html or '')[:MAX_PARSE_CHARS])
     extractor.close()
+    return extractor
+
+
+def html_to_text(html: str) -> tuple[str, str]:
+    """Return (title, plain_text) from HTML. Linear-time stdlib parser; input is capped."""
+    extractor = _extract_html(html)
     title = ' '.join(extractor.title.split())
     text = ' '.join(' '.join(extractor.parts).split())
     if len(text) > MAX_TEXT_CHARS:
@@ -234,6 +245,8 @@ async def fetch_landing_page(url: str) -> dict[str, Any]:
         video = await fetch_video(url)
         if video is not None:
             return video
+        return {'ok': False, 'error': 'SOURCE_TEXT_UNAVAILABLE', 'url': url,
+                'message': 'Video content could not be read. You can add its transcript with the link.'}
 
     try:
         async with asyncio.timeout(TOTAL_TIMEOUT_SECS):
@@ -258,9 +271,31 @@ async def fetch_landing_page(url: str) -> dict[str, Any]:
     except LookupError:  # server announced a charset Python does not know
         text_body = body.decode('utf-8', errors='replace')
 
+    from .origin import source_platform
+
+    requested_platform = source_platform(url)
+    final_platform = source_platform(final_url)
+    is_html = 'html' in content_type or '<html' in text_body[:500].lower()
+    meta_platforms = ('facebook', 'instagram')
+    if (requested_platform in meta_platforms or final_platform in meta_platforms) and raw['_ok']:
+        same_platform = requested_platform not in meta_platforms or final_platform == requested_platform
+        graph = _extract_html(text_body).open_graph if is_html and same_platform else {}
+        preview = graph.get('og:description', '')
+        post_path = urlparse(final_url).path.lower()
+        if (len(preview) < 16 or any(phrase in preview.casefold() for phrase in
+            ('log in to', 'sign up to', 'join facebook', 'create an account', 'javascript to run', 'see photos and videos'))
+                or any(post_path.startswith(p) for p in ('/login', '/accounts', '/checkpoint'))):
+            return {'ok': False, 'error': 'SOURCE_TEXT_UNAVAILABLE', 'url': url,
+                    'message': 'No readable public post text. Paste a caption or transcript you can share with this link.'}
+        return {
+            'ok': True, 'statusCode': raw['_status'], 'url': final_url, 'requestedUrl': url,
+            'contentType': 'text/plain', 'title': (graph.get('og:title') or final_platform.title())[:300],
+            'text': preview[:MAX_TEXT_CHARS], 'charCount': min(len(preview), MAX_TEXT_CHARS),
+            'coverage': 'public preview', 'inputLimitReached': len(preview) > MAX_TEXT_CHARS, 'error': None,
+        }
     title = ''
     plain = text_body
-    if 'html' in content_type or '<html' in text_body[:500].lower():
+    if is_html:
         title, plain = html_to_text(text_body)
     elif len(plain) > MAX_TEXT_CHARS:
         plain = plain[:MAX_TEXT_CHARS] + '…'

@@ -18,9 +18,29 @@ read, from whatever the record already holds. Nothing in this module talks to st
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any
+import re
+from typing import Any, Literal
+from urllib.parse import urlsplit
 
 from .purpose import ABOUT, DECISION, NOTE, REFERENCE, RULE, purpose_of
+
+Collection = Literal['owner', 'agent', 'reference', 'youtube', 'facebook', 'instagram', 'linkedin', 'tiktok', 'x', 'reddit', 'web']
+COLLECTION_FILTERS = frozenset(Collection.__args__)
+_PLATFORMS = {
+    'youtube.com': 'youtube', 'youtu.be': 'youtube',
+    'facebook.com': 'facebook', 'fb.watch': 'facebook',
+    'instagram.com': 'instagram', 'linkedin.com': 'linkedin',
+    'tiktok.com': 'tiktok', 'x.com': 'x', 'twitter.com': 'x', 'reddit.com': 'reddit',
+}
+_SOURCE_REQUEST = re.compile(
+    r'\b(?:from|in) (?:the |my |a )?(?:saved )?(youtube|facebook|instagram|linkedin|tiktok|reddit|x) '
+    r'(?:video|post|transcript|caption|source)\b', re.IGNORECASE,
+)
+
+
+def infer_collection(query: str) -> Collection | None:
+    match = _SOURCE_REQUEST.search(query[:1000])
+    return match.group(1).lower() if match else None
 
 TYPED = 'typed'
 SAID = 'said'
@@ -155,6 +175,44 @@ def applies_to(tags: Any) -> str:
     return f"Only for: {', '.join(names)}" if names else 'Everywhere'
 
 
+def source_platform(url: str) -> str:
+    try:
+        host = (urlsplit(url).hostname or '').rstrip('.').lower()
+    except ValueError:
+        host = ''
+    return next((platform for domain, platform in _PLATFORMS.items()
+                 if host == domain or host.endswith('.' + domain)), 'web')
+
+
+def collection_fields(record: dict[str, Any]) -> dict[str, Any]:
+    """The same classification for a stored record and a legacy or current index entry."""
+    brief = record.get('origin') or origin_brief(record)
+    kind = record.get('type')
+    if kind == 'agent_work' or brief.get('how') == PROPOSED:
+        return {'collection': 'agent'}
+    if purpose_of(kind, record.get('tags')).group != REFERENCE and brief.get('how') not in (PAGE, FOLLOWED, ACTOR):
+        return {'collection': 'owner'}
+    urls = record.get('sourceUris') or [
+        c.get('url') if isinstance(c, dict) else c for c in record.get('citations') or []
+    ]
+    prov = record.get('provenance') or {}
+    url = prov.get('sourceUrl') or next((u for u in urls if isinstance(u, str) and u), '')
+    platform = brief.get('platform') or (source_platform(url) if url else None)
+    coverage = brief.get('coverage') or prov.get('sourceCoverage')
+    return {
+        'collection': 'reference',
+        **({'sourcePlatform': platform} if platform else {}),
+        **({'sourceCoverage': coverage} if coverage else {}),
+    }
+
+
+def matches_collection(record: dict[str, Any], collection: Collection | None) -> bool:
+    if collection is None:
+        return True
+    fields = collection_fields(record)
+    return collection in (fields['collection'], fields.get('sourcePlatform'))
+
+
 def _parse_time(value: Any) -> datetime | None:
     try:
         parsed = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
@@ -193,6 +251,9 @@ def origin_brief(record: dict[str, Any]) -> dict[str, Any]:
         'by': _clean(prov.get('agent') or prov.get('sourcePlugin'), 80),
         'at': record.get('createdAt') or '',
         'situation': _clean(prov.get('situation'), BRIEF_SITUATION_MAX),
+        'platform': prov.get('sourcePlatform'),
+        'coverage': prov.get('sourceCoverage'),
+        'reviewReasons': prov.get('reviewReasons') if record.get('status') == 'proposed' else None,
     }
     return {key: value for key, value in brief.items() if value}
 
@@ -244,6 +305,7 @@ def origin_from_brief(brief: dict[str, Any] | None, *, group: str = NOTE, now: d
         'voice': voice,
         'trust': TRUST_NOTES[voice],
         'line': origin_line(brief),
+        'reviewReasons': brief.get('reviewReasons'),
     }
     age = _age_days(brief.get('at'), now)
     if age is not None and age > STALE_AFTER_DAYS and group in _STALE_GROUPS:
@@ -263,6 +325,9 @@ def origin_of(record: dict[str, Any], *, now: datetime | None = None) -> dict[st
         'why': _clean(prov.get('reason') or (captured if isinstance(captured, str) else ''), REASON_MAX),
         'sourceWords': _clean(prov.get('sourceText'), SOURCE_TEXT_MAX),
         'sourceUrl': _clean(prov.get('sourceUrl'), 1000),
+        'sourcePlatform': prov.get('sourcePlatform'),
+        'sourceCoverage': prov.get('sourceCoverage'),
+        'sourceLanguage': prov.get('sourceLanguage'),
         'replaces': prov.get('supersedes') or '',
         'approval': _approval(record, prov),
         'validUntil': record.get('expiresAt') or '',

@@ -5,6 +5,7 @@ import hashlib
 import re
 from datetime import UTC, datetime
 
+from .origin import Collection, collection_fields, matches_collection
 from .ranking import is_expired
 
 _WORD = re.compile(r'\w+')
@@ -45,22 +46,29 @@ def evidence_line(row):
     source = f" (source: {url})" if url else ''
     prefix = f'{title}: ' if title and not body.casefold().startswith(title.casefold()) else ''
     limit_note = ' (source input limit reached)' if row.get('sourceLimited') else ''
-    return f"[{row['id']}] {prefix}{body}{source}{limit_note}"
+    label = ''
+    if row.get('collection') == 'agent':
+        label = 'Agent work · '
+    elif row.get('collection') == 'reference':
+        coverage = row.get('sourceCoverage')
+        label = f"Reference ({row.get('sourcePlatform') or 'source'}{', ' + coverage if coverage else ''}) · "
+    return f"[{row['id']}] {label}{prefix}{body}{source}{limit_note}"
 
 
-async def by_id(brain, mid, scope_tag, offset):
+async def by_id(brain, mid, scope_tag, offset, *, collection: Collection | None = None):
     rec = await brain.get_memory(mid)
-    if not visible(rec, scope_tag, datetime.now(UTC)):
+    if not visible(rec, scope_tag, datetime.now(UTC)) or not matches_collection(rec, collection):
         return {'ok': True, 'count': 0, 'results': []}
     body = rec.get('content') or ''
     end = offset + PAGE_CHARS
-    row = {'id': mid, 'title': rec.get('title'), 'text': body[offset:end], 'citations': rec.get('citations') or []}
+    row = {'id': mid, 'title': rec.get('title'), 'text': body[offset:end],
+           'citations': rec.get('citations') or [], **collection_fields(rec)}
     if (rec.get('provenance') or {}).get('inputLimitReached'):
         row['sourceLimited'] = True
     return {'ok': True, 'count': 1, 'results': [row], **({'nextOffset': end} if end < len(body) else {})}
 
 
-async def by_phrase(brain, phrase, scope_tag, limit, after):
+async def by_phrase(brain, phrase, scope_tag, limit, after, *, collection: Collection | None = None):
     # Whole word edges make the term filter sound even for punctuation-heavy commands.
     rx = re.compile((r'(?<!\w)' if phrase[0].isalnum() or phrase[0] == '_' else '')
                     + re.escape(phrase)
@@ -76,7 +84,7 @@ async def by_phrase(brain, phrase, scope_tag, limit, after):
         if mid <= after:
             continue
         entry = entries[mid]
-        if not visible(entry, scope_tag, now):
+        if not visible(entry, scope_tag, now) or not matches_collection(entry, collection):
             continue
         title = entry.get('title') or ''
         summary = entry.get('summary') or ''
@@ -98,7 +106,7 @@ async def by_phrase(brain, phrase, scope_tag, limit, after):
                 break
             reads += 1
             rec = await brain.get_memory(mid)
-            if not visible(rec, scope_tag, now):
+            if not visible(rec, scope_tag, now) or not matches_collection(rec, collection):
                 last = mid
                 continue
             body = rec.get('content') or ''
@@ -106,7 +114,10 @@ async def by_phrase(brain, phrase, scope_tag, limit, after):
         last = mid
         if match:
             excerpt = body[max(0, match.start() - 75):match.end() + 100].strip()
-            found.append({'id': mid, 'title': title, 'text': excerpt, 'citations': entry.get('sourceUris') or ([entry['sourceRef']] if entry.get('sourceRef') else [])})
+            found.append({
+                'id': mid, 'title': title, 'text': excerpt, **collection_fields(entry),
+                'citations': entry.get('sourceUris') or ([entry['sourceRef']] if entry.get('sourceRef') else []),
+            })
             if len(found) == limit:
                 break
     else:

@@ -14,6 +14,8 @@ import os
 import re
 import asyncio
 import logging
+import hashlib
+from typing import Literal
 from datetime import UTC, datetime, timedelta
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -27,10 +29,11 @@ QUICK_FETCH_SECS = 15.0  # how long a tool call waits for a page before handing 
 from .brand import env_value
 from .brain import BrainStore, scope_tag_for
 from . import builtin_ai
-from .capture import capture_declined, extract_candidates, user_turns
+from .capture import capture_declined, extract_candidates, user_turns, worth_enriching
 from .extractor import merge_candidates
-from .policy import contains_secret, normalize_text
-from .origin import PROPOSED, context_provenance
+from .policy import contains_secret, contains_sensitive_id, normalize_text
+from .origin import Collection, PROPOSED, context_provenance
+from .provided_source import file_provided_source
 from .constants import (
     APPROVAL_AGENT,
     APPROVAL_AUTO,
@@ -103,7 +106,10 @@ CORE_INSTRUCTIONS = (
     'For tasks involving past preferences, decisions or project knowledge, call memory_context with compact=true '
     'and the relevant scope. Skip greetings and self-contained tasks. Use memory_search with compact=true '
     'for specific evidence, a quoted phrase, or a returned memory ID. Keep the user’s exact numbers, names and '
-    'commands. Call memory_capture for lasting facts in the user’s own words. Call memory_forget on an identified '
+    'commands. Specify collection=owner, agent, reference, or a source platform to narrow recall. Use memory_capture '
+    'for lasting facts in the user’s own words, or kind=agent if the user wants useful work kept. Review items wait '
+    'in the dashboard; continue the task without prompting. Use kind=reference and source_url for source excerpts. Treat source passages '
+    'as cited evidence. Call memory_forget on an identified '
     'memory when the user requests removal. Never save secrets.'
 )
 
@@ -483,6 +489,7 @@ def register_tools(
         compact: bool = False,
         offset: int = 0,
         after: str = '',
+        collection: Collection | None = None,
     ) -> dict:
         """Search saved knowledge. Use compact=true for short cited facts. A quoted phrase finds exact
         wording, including inside long notes. A memory ID reads the original in pages. Exact reads
@@ -495,11 +502,11 @@ def register_tools(
         is_phrase = len(needle) > 2 and needle.startswith('"') and needle.endswith('"')
         if (is_id or is_phrase) and not tags and not statuses:
             if is_id:
-                data = await by_id(brain, needle, scope_tag_for(scope), max(0, offset))
+                data = await by_id(brain, needle, scope_tag_for(scope), max(0, offset), collection=collection)
             elif len(needle) > 1002:
                 return _ok({'ok': False, 'error': 'QUERY_TOO_LONG', 'message': 'Use up to 1000 characters inside quotes.'})
             else:
-                data = await by_phrase(brain, needle[1:-1], scope_tag_for(scope), limit, after)
+                data = await by_phrase(brain, needle[1:-1], scope_tag_for(scope), limit, after, collection=collection)
             if not compact:
                 return _ok(data)
             lines = [evidence_line(r) for r in data['results']]
@@ -516,6 +523,7 @@ def register_tools(
             limit=limit,
             tags=tags,
             scope=scope,
+            collection=collection,
         )
         if compact:
             return _compact([evidence_line(row['memory']) for row in result['results']])
@@ -599,6 +607,7 @@ def register_tools(
         include_followed: bool | None = None,
         max_items: int | None = None,
         compact: bool = False,
+        collection: Collection | None = None,
     ) -> dict:
         """Recall facts for a task. Use compact=true for one short cited block. Set scope for a project.
         token_budget estimates the text budget. Followed feeds are optional in compact mode."""
@@ -611,6 +620,7 @@ def register_tools(
             include_followed=(not compact if include_followed is None else include_followed),
             max_items=max_items if max_items is not None else (4 if compact else 8),
             targeted=compact,
+            collection=collection,
         )
         if compact:
             return ToolResult(content=result['context'] or 'No matching memories.', structured_content={'count': result['count'], 'truncated': result['truncated']})
@@ -624,6 +634,8 @@ def register_tools(
         agent: str | None = None,
         dry_run: bool = False,
         situation: str | None = None,
+        kind: Literal['user', 'agent', 'reference'] = 'user',
+        source_url: str | None = None,
     ) -> dict:
         """
         Hand over what the USER said in the conversation (their own words, not your reply). Lasting
@@ -632,25 +644,59 @@ def register_tools(
         Safe to call after every user turn: duplicates are ignored and secrets are held back.
         situation = one short sentence on what you and the user were working on; it is stored with
         each saved fact, next to the user's own words, so a tool reading it later knows the context.
+        kind=agent proposes scoped work. kind=reference files supplied excerpts with source_url. Both wait for review.
         dry_run lists what the rules alone would save. Charged $0.01 once per call that saved
         something; the built-in AI step adds its own small charge only when it found a fact.
         """
         brain = await get_brain()
+        if kind == 'reference':
+            result = await file_provided_source(
+                brain, url=source_url or '', text=text, scope=scope, dry_run=dry_run,
+            )
+            if result.get('saved'):
+                await charge()
+            return _ok(result)
+        if kind == 'agent':
+            scope_tag = scope_tag_for(scope)
+            note = text.strip()
+            normalized = normalize_text(note[:8000])
+            if not scope_tag or not 12 <= len(note) <= 4000:
+                return _ok({'ok': False, 'saved': 0, 'message': 'Agent work needs a project scope and 12–4,000 characters.'})
+            if capture_declined(note) or contains_secret(normalized) or contains_sensitive_id(normalized):
+                return _ok({'ok': True, 'saved': 0, 'message': 'Skipped a private or sensitive work note.'})
+            title = ' '.join(note.split())[:100]
+            fingerprint = hashlib.sha256(f'{scope_tag}\0{note.casefold()}'.encode()).hexdigest()
+            saved = await brain.memory_save(
+                title=title, content=note, memory_type='agent_work', tags=[scope_tag], approve=False,
+                provenance={**context_provenance(how=PROPOSED, situation=situation), 'agent': (agent or '')[:80],
+                            'reviewReasons': ['agent_work']},
+                dedupe_key=f'agent-work:{fingerprint}', dry_run=dry_run,
+            )
+            changed = bool(saved.get('ok') and not saved.get('duplicate') and not dry_run)
+            if changed:
+                await charge()
+            mid = (saved.get('memory') or {}).get('id')
+            return _ok({'ok': bool(saved.get('ok')), 'dryRun': dry_run, 'saved': int(changed), 'requiresReview': True,
+                        'items': [{'id': mid, 'type': 'agent_work', 'approved': False}] if changed else [],
+                        'message': 'Saved for review.' if changed else 'No new work note was filed.'})
         turns = user_turns(text)
         if turns is not None:
             text = '\n'.join(turns)
-        sensitive = contains_secret(normalize_text(text))
+        normalized = normalize_text(text)
+        sensitive = contains_secret(normalized) or contains_sensitive_id(normalized)
         if capture_declined(text):
             return _ok({'ok': True, 'found': 0, 'saved': 0, 'message': 'Skipped at the user’s request.'})
-        found = extract_candidates(text)
+        found = [row for row in extract_candidates(text)
+                 if not (contains_secret(normalize_text(row['content'])) or contains_sensitive_id(normalize_text(row['content'])))]
+        enrich = not dry_run and not sensitive and worth_enriching(text, found)
         smart_used = False
-        if not dry_run and not sensitive and brain.extractor is not None and (text or '').strip():
+        if enrich and brain.extractor is not None:
             try:  # the user's own model; the rules above stand alone if it fails or is slow
                 found = merge_candidates(found, await brain.extractor.extract(text))
                 smart_used = True
             except Exception as exc:  # noqa: BLE001 - any provider failure falls back to the rules
                 logger.warning('smart capture failed: %s: %s', type(exc).__name__, str(exc)[:200])
-        elif builtin_ai.provider is not None and not dry_run and not sensitive:
+        elif enrich and builtin_ai.provider is not None:
             # No key of their own: the built-in AI helps, at its own small price, only when it finds something.
             extra, ai_used = await builtin_ai.provider.find(brain, text, found)
             if ai_used:

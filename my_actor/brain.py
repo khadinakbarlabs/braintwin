@@ -55,7 +55,7 @@ from .ingest import check_url_async
 from .ingest_queue import IngestQueue, job_id_for
 from .ranking import MAX_QUERY_CHARS, QUERY_STOPWORDS, SCORER, RankIndex, hybrid_rank, is_expired, stem_tokens
 from .import_memories import normalize_plugin_export
-from .origin import SAID, context_provenance, origin_of, usage_of
+from .origin import Collection, SAID, context_provenance, matches_collection, origin_of, source_platform, usage_of
 from .policy import evaluate as evaluate_policy
 from .policy import MAX_REPLACEMENTS_PER_DAY, MODE_OPEN, OPEN_CAP_FACTOR, load_policy, normalize_title_key
 from .storage import atomic_write, open_storage
@@ -107,8 +107,14 @@ def _dedupe_key(title: str, content: str, explicit: str | None) -> str:
     return hashlib.sha256(raw.encode('utf-8')).hexdigest()[:32]
 
 
-def _source_key(url: str, version: str, part: str = '') -> str:
-    key = f'source:{url}{version}{part}'
+def _source_scopes(tags: list[str] | None) -> tuple[str, ...]:
+    return tuple(sorted({str(t).lower() for t in (tags or []) if str(t).lower().startswith('scope:')}))
+
+
+def _source_key(url: str, version: str, part: str = '', *, tags: list[str] | None = None) -> str:
+    scopes = _source_scopes(tags)
+    scope_suffix = ':' + hashlib.sha256('\0'.join(scopes).encode()).hexdigest()[:24] if scopes else ''
+    key = f'source:{url}{version}{part}{scope_suffix}'
     return key if len(key) <= 200 else 'source:' + hashlib.sha256(key.encode()).hexdigest()
 
 
@@ -897,8 +903,17 @@ class BrainStore:
         version = f"@{ingest['version']}" if ingest.get('version') else ''
         source['version'] = version
         all_tags = list(set((tags or source.get('tags') or []) + ['source', 'ingest']))
+        platform = source_platform(ingest.get('url') or source['url'])
+        coverage = ingest.get('coverage') or ('transcript' if ingest.get('hasTranscript') else
+                                               'metadata' if ingest.get('kind') == 'youtube' else 'page')
+        source['lastIngest'].update({'platform': platform, 'coverage': coverage,
+                                     'language': ingest.get('transcriptLanguage')})
+        reference = {
+            'sourceUrl': source['url'], 'untrusted': True, 'sourcePlatform': platform,
+            'sourceCoverage': coverage, 'sourceLanguage': ingest.get('transcriptLanguage'),
+        }
         provenance: dict[str, Any] = {
-            'sourceUrl': source['url'], 'untrusted': True, 'storedChars': len(content),
+            **reference, 'storedChars': len(content),
             'inputLimitReached': bool(ingest.get('inputLimitReached')) or len(fetched) > len(content),
         }
         previous_id = source.get('proposedMemoryId')
@@ -911,6 +926,8 @@ class BrainStore:
         keep, reasons, rule = (await self._auto_decision(source['title'], content, all_tags, provenance)) if auto else (False, ['not_automatic'], '')
         if keep:
             provenance['autoApproved'] = {'rule': rule, 'at': _now()}
+        else:
+            provenance['reviewReasons'] = ['provided_source'] if coverage == 'provided text' else reasons
         await self.begin_batch()
         try:
             mem = await self.memory_save(
@@ -921,7 +938,7 @@ class BrainStore:
                 citations=[{'url': source['url'], 'sourceId': source['id']}],
                 confidence=0.6,
                 approve=keep,
-                dedupe_key=_source_key(source['url'], version),
+                dedupe_key=_source_key(source['url'], version, tags=all_tags),
                 provenance=provenance,
             )
             source['proposedMemoryId'] = mem.get('memory', {}).get('id')
@@ -931,7 +948,7 @@ class BrainStore:
             limit = LONG_SOURCE_PASSAGES if ingest.get('kind') == 'youtube' else None
             if keep and source['filedNew']:
                 await self._retire_superseded(mem['memory'], _now())
-            await self._file_passages(source, mem, ingest.get('text') or '', tags, approve=keep, limit=limit)
+            await self._file_passages(source, mem, content, tags, approve=keep, limit=limit)
             await self.audit(
                 'ingest',
                 source_id=source['id'],
@@ -979,8 +996,14 @@ class BrainStore:
                         citations=[{'url': source['url'], 'sourceId': source['id']}],
                         confidence=0.6,
                         approve=approve,
-                        dedupe_key=_source_key(source['url'], source.get('version') or '', f'#p{i}'),
-                        provenance={'sourceUrl': source['url'], 'untrusted': True, 'parentId': parent_id},
+                        dedupe_key=_source_key(source['url'], source.get('version') or '', f'#p{i}',
+                                               tags=tags or source.get('tags')),
+                        provenance={
+                            'sourceUrl': source['url'], 'untrusted': True, 'parentId': parent_id,
+                            'sourcePlatform': source['lastIngest']['platform'],
+                            'sourceCoverage': source['lastIngest']['coverage'],
+                            'sourceLanguage': source['lastIngest']['language'],
+                        },
                     )
                 cid = (res.get('memory') or {}).get('id')
                 return cid if cid and not res.get('duplicate') else None
@@ -1037,7 +1060,7 @@ class BrainStore:
         async with self._sources_lock:
             sources = await self._get_sources()
             for existing in sources:
-                if existing.get('url') == url:
+                if existing.get('url') == url and _source_scopes(existing.get('tags')) == _source_scopes(tags):
                     if existing.get('lastIngest') is None and ingest and ingest.get('ok'):
                         # Registered earlier but never fetched (the page failed then): take it now.
                         await self._apply_ingest(existing, ingest, tags or None, auto=auto)
@@ -1070,7 +1093,9 @@ class BrainStore:
                 await self.audit('ingest', source_id=source_id, detail=f'registered:{url}')
             return {'ok': True, 'duplicate': False, 'source': source, 'ingest': ingest}
 
-    async def source_refresh(self, *, url: str, title: str, tags: list[str], ingest: dict[str, Any]) -> dict[str, Any]:
+    async def source_refresh(
+        self, *, url: str, title: str, tags: list[str], ingest: dict[str, Any], auto: bool = True,
+    ) -> dict[str, Any]:
         """Add a source, or replace its stored copy with a newer version (connectors use this).
 
         The new version is filed first (and approved if the owner chose automatic saving); only
@@ -1078,7 +1103,8 @@ class BrainStore:
         """
         async with self._sources_lock:
             sources = await self._get_sources()
-            source = next((s for s in sources if s.get('url') == url), None)
+            scopes = _source_scopes(tags)
+            source = next((s for s in sources if s.get('url') == url and _source_scopes(s.get('tags')) == scopes), None)
             old_id = source.get('proposedMemoryId') if source else None
             if source is None:
                 if len(sources) >= MAX_SOURCES:
@@ -1092,7 +1118,7 @@ class BrainStore:
                     return {'ok': True, 'filedNew': False, 'source': source, 'memoryId': old_id}
                 ingest = {**ingest, 'version': hashlib.sha256(f'{old_id}|{fingerprint}'.encode()).hexdigest()[:24]}
                 source['contentHash'] = fingerprint
-            await self._apply_ingest(source, ingest, tags, auto=True)
+            await self._apply_ingest(source, ingest, tags, auto=auto)
             await self._set_sources(sources)
             new_id = source.get('proposedMemoryId')
             if source.get('filedNew') and old_id and old_id != new_id:
@@ -1199,7 +1225,7 @@ class BrainStore:
         from .capture import replaces, same_fact
 
         found = await self.memory_search(content[:MAX_QUERY_CHARS], statuses=['approved', 'proposed'],
-                                         scope=scope, limit=12, use_meaning=False)
+                                         scope=scope, collection='owner', limit=12, use_meaning=False)
         replaced: dict[str, Any] | None = None
         for row in found.get('results') or []:
             card = row.get('memory') or {}
@@ -1305,7 +1331,9 @@ class BrainStore:
                 provenance['agent'] = agent
             if old:
                 provenance['supersedes'] = old.get('id')  # saving the new one retires the old one
-            reasons: list[str] = ['not_automatic'] if not auto else []
+            reasons: list[str] = list(cand.get('reviewReasons') or [])
+            if not auto:
+                reasons.append('not_automatic')
             rule = ''
             if auto:
                 decision = evaluate_policy(
@@ -1313,7 +1341,8 @@ class BrainStore:
                     confidence=float(cand['confidence']), tags=tags, provenance=provenance, policy=policy,
                     scope_tag=[t for t in tags if str(t).lower().startswith('scope:')],
                 )  # fmt: skip
-                reasons, rule = list(decision.reasons), decision.rule
+                reasons.extend(decision.reasons)
+                rule = decision.rule
                 if decision.ok and old:
                     if not open_mode:
                         reasons.append('would_replace_existing')
@@ -1345,6 +1374,8 @@ class BrainStore:
                     prov = dict(p['provenance'])
                     if approve:
                         prov['autoApproved'] = {'rule': p['rule'], 'at': _now()}
+                    else:
+                        prov['reviewReasons'] = p['reasons']
                     res = await self.memory_save(
                         title=cand['title'], content=cand['content'], memory_type=cand['type'], tags=tags,
                         confidence=cand['confidence'], provenance=prov, approve=approve,
@@ -1804,6 +1835,7 @@ class BrainStore:
         tags: list[str] | None = None,
         scope: str | None = None,
         use_meaning: bool = True,
+        collection: Collection | None = None,
     ) -> dict[str, Any]:
         """Ranked search over the thin index. Reads take no lock (see _current_index_entries)."""
         return await self._memory_search_unlocked(
@@ -1814,6 +1846,7 @@ class BrainStore:
             tags=tags,
             scope=scope,
             use_meaning=use_meaning,
+            collection=collection,
         )
 
     async def _memory_search_unlocked(
@@ -1826,6 +1859,7 @@ class BrainStore:
         tags: list[str] | None = None,
         scope: str | None = None,
         use_meaning: bool = True,
+        collection: Collection | None = None,
     ) -> dict[str, Any]:
         if self._holds_batch():  # inside an import batch: use its in-memory index, no cache
             entries = dict((await self._get_search_index()).get('entries') or {})
@@ -1850,6 +1884,8 @@ class BrainStore:
             if is_expired(entry, now_dt):
                 continue
             if scope_tag and scope_tag not in {str(t).lower() for t in (entry.get('tags') or [])}:
+                continue
+            if not matches_collection(entry, collection):
                 continue
             if tag_filter:
                 rec_tags = {str(t).lower() for t in (entry.get('tags') or [])}
@@ -2265,17 +2301,20 @@ use_meaning
         sort: str = 'newest',
         limit: int = 50,
         offset: int = 0,
+        scope: str | None = None,
+        collection: Collection | None = None,
     ) -> dict[str, Any]:
         """Page through memories from the thin index (owner dashboard). Lock-free read, no bodies."""
         entries = await self._current_index_entries()
         allowed = {str(x) for x in statuses} if statuses else {'approved'}
-        want = (tag or '').strip().lower()
+        want = {item for item in ((tag or '').strip().lower(), scope_tag_for(scope)) if item}
         rows = [
             e
             for e in entries.values()
             if isinstance(e, dict)
             and e.get('status') in allowed
-            and (not want or want in {str(t).lower() for t in (e.get('tags') or [])})
+            and (not want or want.issubset(str(t).lower() for t in (e.get('tags') or [])))
+            and matches_collection(e, collection)
         ]
         if sort == 'title':
             rows.sort(key=lambda e: str(e.get('title') or '').lower())

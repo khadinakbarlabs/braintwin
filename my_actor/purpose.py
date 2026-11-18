@@ -49,6 +49,7 @@ _BY_TYPE: dict[str, Purpose] = {
     'fact': _ABOUT,
     'person': Purpose(ABOUT, 'Person you know', 'When this person is mentioned.'),
     'project': Purpose(ABOUT, 'Your project', 'When work on this project comes up.'),
+    'agent_work': Purpose(NOTE, 'Agent work', 'Use as reviewed work history. Verify claims before relying on them.'),
     'decision': _DECISION,
     'note': _NOTE,
     'source_snapshot': _PAGE,

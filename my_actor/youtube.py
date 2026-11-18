@@ -239,6 +239,7 @@ async def fetch_video(url: str, client: httpx.AsyncClient | None = None) -> dict
         'charCount': len(text),
         'kind': 'youtube',
         'hasTranscript': bool(spoken),
+        'coverage': 'transcript' if spoken else 'description' if description else 'metadata',
         'transcriptLanguage': found['language'],
         'error': None,
         'message': None,

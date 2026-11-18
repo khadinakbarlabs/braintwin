@@ -17,6 +17,7 @@ whole thing off with BRAINTWIN_DASHBOARD=off.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -44,6 +45,9 @@ from .dashboard_page import render_page
 from .follow import follow_add, follow_list, follow_memory_ids, follow_remove, follow_sync, follow_update
 from .import_memories import text_to_records
 from .ingest import check_url_async, fetch_landing_page, fetch_text
+from .origin import COLLECTION_FILTERS
+from .brain import scope_tag_for
+from .provided_source import file_provided_source
 
 PAGE_PATHS = ('/', '/dashboard', '/dashboard/')
 MAX_BODY_BYTES = 64 * 1024
@@ -252,14 +256,21 @@ class DashboardMiddleware:
                 statuses = [s for s in status.split(',') if s in ALLOWED_STATUSES] or ['approved']
                 text = (q.get('q') or '').strip()[:MAX_QUERY]
                 limit = max(1, min(_int(q.get('limit'), 50), 100))
+                collection = q.get('collection') or None
+                if collection is not None and collection not in COLLECTION_FILTERS:
+                    return _err(400, 'INVALID_COLLECTION', 'Choose a listed collection.')
+                scope = q.get('scope')
+                tag = q.get('tag')
                 if text:
-                    res = await brain.memory_search(text, approved_only=False, statuses=statuses, limit=min(limit, 50))
+                    res = await brain.memory_search(text, approved_only=False, statuses=statuses, limit=min(limit, 50),
+                                                    collection=collection, scope=scope, tags=[tag] if tag else None)
                     items = [r['memory'] for r in (res.get('results') or []) if isinstance(r.get('memory'), dict)]
                     return _json({'ok': True, 'total': len(items), 'offset': 0, 'items': items, 'searched': True})
                 sort = q.get('sort') if q.get('sort') in ('newest', 'oldest', 'title') else 'newest'
                 return _json(
                     await brain.memory_list(
-                        statuses=statuses, tag=q.get('tag'), sort=sort, limit=limit, offset=_int(q.get('offset'), 0)
+                        statuses=statuses, tag=tag, sort=sort, limit=limit, offset=_int(q.get('offset'), 0),
+                        collection=collection, scope=scope,
                     )
                 )
             if name == 'follows':
@@ -478,23 +489,40 @@ class DashboardMiddleware:
             url = str(body.get('url') or '').strip()
             if not url or len(url) > 2000:
                 return _err(400, 'INVALID_INPUT', 'Paste one link.')
+            if 'text' in body:
+                text = body.get('text')
+                if not isinstance(text, str):
+                    return _err(400, 'INVALID_INPUT', 'Paste the source text.')
+                result = await file_provided_source(
+                    brain, url=url, text=text, title=str(body.get('title') or ''), scope=str(body.get('scope') or ''),
+                    tag='dashboard',
+                )
+                if result.get('saved'):
+                    await self.charge()
+                return _json(result, 200 if result['ok'] else 400)
             if await check_url_async(url):
                 return _json({'ok': False, 'error': 'BAD_URL', 'message': 'Only public web links can be saved.'})
+            scope = scope_tag_for(str(body.get('scope') or ''))
+            tags = ['dashboard'] + ([scope] if scope else [])
             try:
                 async with asyncio.timeout(LINK_FETCH_SECS):
                     ingest = await fetch_landing_page(url)
             except TimeoutError:
                 return _json({'ok': False, 'error': 'TIMEOUT', 'message': 'That page took too long. Nothing saved, not charged.'})
             if not ingest.get('ok'):
-                return _json({'ok': False, 'error': 'FETCH_FAILED', 'message': 'Could not read that page. Nothing saved, not charged.'})
-            res = await brain.source_add(url=url, title=None, tags=['dashboard'], ingest=ingest, auto=self.approval == 'auto')
+                unavailable = ingest.get('error') == 'SOURCE_TEXT_UNAVAILABLE'
+                return _json({'ok': False, 'error': 'SOURCE_TEXT_UNAVAILABLE' if unavailable else 'FETCH_FAILED',
+                              'message': ingest['message'] if unavailable else 'Could not read that page. Nothing saved, not charged.'})
+            res = await brain.source_add(url=url, title=None, tags=tags, ingest=ingest, auto=self.approval == 'auto')
             if not res.get('ok'):
                 return _json({'ok': False, 'error': res.get('error') or 'FAILED', 'message': res.get('message') or 'Could not save that page.'})
             src = res.get('source') or {}
             if res.get('duplicate') or src.get('alreadyDecided') or src.get('filedNew') is False:
                 return _json({'ok': True, 'saved': False, 'message': 'Already in your memory. Not charged.'})
             await self.charge()
-            return _json({'ok': True, 'saved': True, 'message': 'Page saved.'})
+            coverage = (src.get('lastIngest') or {}).get('coverage')
+            return _json({'ok': True, 'saved': True, 'coverage': coverage, 'reviewRequired': not src.get('autoSaved'),
+                          'message': 'Source saved.' if src.get('autoSaved') else 'Source added to review.'})
         if name == 'add':
             title = str(body.get('title') or '').strip()
             content = str(body.get('content') or '').strip()
@@ -507,13 +535,20 @@ class DashboardMiddleware:
                 # Work out what the sentence is (a rule, a fact about the owner, a decision) from its wording.
                 found = extract_candidates(content, max_items=1)
                 mtype = found[0]['type'] if found else 'note'
+            scope = scope_tag_for(str(body.get('scope') or ''))
+            tags = ([scope] if scope else []) + ['dashboard'] + _clean_tags(body.get('tags'))
+            key = (
+                'typed:' + hashlib.sha256(f'{scope}\0{title.casefold()}\0{content.casefold()}'.encode()).hexdigest()
+                if scope else None
+            )
             res = await brain.memory_save(
                 title=title,
                 content=content,
                 memory_type=mtype if mtype in ALLOWED_TYPES else 'note',
-                tags=_clean_tags(body.get('tags')) + ['dashboard'],
+                tags=tags,
                 confidence=1.0,
                 approve=True,  # typed by the owner in their own dashboard
+                dedupe_key=key,
                 provenance={'via': 'dashboard', 'how': 'typed'},
             )
             if res.get('ok', True) and not res.get('duplicate'):

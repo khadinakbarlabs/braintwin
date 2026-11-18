@@ -9,7 +9,7 @@ from typing import Any
 
 from .constants import INDEX_TOKEN_CHARS, SUMMARY_CHARS
 from .exact_recall import term_filter
-from .origin import card_fields, origin_brief
+from .origin import card_fields, collection_fields, origin_brief
 from .purpose import purpose_fields
 
 _TOKEN_RE = re.compile(r'[a-z0-9_]+', re.IGNORECASE)
@@ -77,6 +77,7 @@ def memory_card(record: dict[str, Any], *, snippet_chars: int = 240) -> dict[str
         'citations': list(record.get('citations') or []),
         'updatedAt': record.get('updatedAt'),
         'approvedAt': record.get('approvedAt'),
+        **collection_fields(record),
         **purpose_fields(record.get('type'), record.get('tags')),
         **card_fields(record.get('type'), record.get('tags'), origin_brief(record)),
     }
@@ -99,6 +100,7 @@ def card_from_index_entry(entry: dict[str, Any], *, snippet_chars: int = 240) ->
         'citations': [{'url': u} for u in uris] or ([entry['sourceRef']] if entry.get('sourceRef') else []),
         'updatedAt': entry.get('updatedAt'),
         'approvedAt': entry.get('approvedAt'),
+        **collection_fields(entry),
         **purpose_fields(entry.get('type'), entry.get('tags')),
         **card_fields(entry.get('type'), entry.get('tags'), entry.get('origin')),
     }

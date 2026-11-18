@@ -234,6 +234,7 @@ function viewMove(){
   var dl=h('button',{class:'btn acc',type:'button',text:'Download my memory'});
   dl.addEventListener('click',function(){var keep=state.status;state.status='approved';exportAll(dl);state.status=keep;});
   file.appendChild(h('div',{class:'row'},dl,h('button',{class:'btn ghost',type:'button',text:'Bring in a file',onclick:function(){go('import')}})));
+  if(!HOSTED)return;
   var local=h('section',{class:'card'},h('h2',{text:'Run Braintwin on your own computer'}));box.appendChild(local);
   local.appendChild(h('p',{class:'note',text:'Free. Your memories are kept in one private file on your disk and nothing is sent anywhere. Needs Python 3.11 or newer.'}));
   snip(local,'1. Install','Paste this one line into your terminal. It also prints the exact line for each AI tool.','curl -fsSL https://raw.githubusercontent.com/khadinakbarlabs/braintwin/main/install.sh | bash');

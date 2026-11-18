@@ -139,9 +139,25 @@ _NO_CAPTURE = re.compile(
     r"(?:this|that|anything|what I|my|our|the following)\b|\boff the record\b", re.I,
 )
 
+_TENTATIVE = re.compile(
+    r"\b(?:maybe|perhaps|probably|might|not sure|still deciding|considering|thinking about|tentatively)\b", re.I
+)
+_EXAMPLE = re.compile(r"^(?:for example|for instance|hypothetically|imagine|suppose|what if)\b", re.I)
+_CHATTER = re.compile(r"^(?:hi|hello|hey|thanks|thank you|ok|okay|great|got it|sounds good|sure)[\s.!]*$", re.I)
+
 
 def capture_declined(text: str) -> bool:
     return bool(_NO_CAPTURE.search(text or ''))
+
+
+def worth_enriching(text: str, candidates: list[dict[str, Any]]) -> bool:
+    """Avoid model calls for low-signal turns or when automatic classification is unsafe."""
+    text = text.strip()
+    if not text or _CHATTER.fullmatch(text) or _EXAMPLE.match(text):
+        return False
+    if _TENTATIVE.search(text):
+        return False
+    return bool(candidates) or not (len(text) <= 160 and text.endswith('?'))
 
 
 def extract_candidates(text: str, *, max_items: int = MAX_CANDIDATES) -> list[dict[str, Any]]:
@@ -154,7 +170,7 @@ def extract_candidates(text: str, *, max_items: int = MAX_CANDIDATES) -> list[di
     pieces = [c for raw in _SPLIT_RE.split((text or '')[:MAX_TEXT_CHARS]) for c in _clauses(_clean(raw))]
     for raw in pieces:
         sentence = _clean(raw)
-        if not (MIN_SENTENCE <= len(sentence) <= MAX_SENTENCE) or sentence.endswith('?'):
+        if not (MIN_SENTENCE <= len(sentence) <= MAX_SENTENCE) or sentence.endswith('?') or _EXAMPLE.match(sentence):
             continue
         key = sentence.lower()
         if key in seen:
@@ -169,6 +185,7 @@ def extract_candidates(text: str, *, max_items: int = MAX_CANDIDATES) -> list[di
                         'type': memory_type,
                         'confidence': confidence,
                         'reason': reason,
+                        **({'reviewReasons': ['tentative_statement']} if _TENTATIVE.search(sentence) else {}),
                     }
                 )
                 break

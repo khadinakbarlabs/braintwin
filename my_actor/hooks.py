@@ -14,7 +14,7 @@ from .brain import BrainStore, scope_tag_for
 from .capture import extract_candidates, user_turns
 from .context_pack import FENCE, _line
 from .ranking import is_expired
-from .policy import contains_secret, normalize_text
+from .policy import contains_secret, contains_sensitive_id, normalize_text
 
 logger = logging.getLogger(__name__)
 
@@ -96,10 +96,12 @@ async def run_hook(
                 return {'hookSpecificOutput': {'hookEventName': expected, 'additionalContext': text}}
         else:
             text = data.get('prompt')
-            if isinstance(text, str) and text.strip() and not contains_secret(normalize_text(text)):
+            if isinstance(text, str) and text.strip():
                 text = text[:MAX_PROMPT_CHARS]
                 turns = user_turns(text)
-                found = extract_candidates('\n'.join(turns) if turns is not None else text)
+                user_text = '\n'.join(turns) if turns is not None else text
+                normalized = normalize_text(user_text)
+                found = [] if contains_secret(normalized) or contains_sensitive_id(normalized) else extract_candidates(user_text)
                 if found:
                     await brain.save_captured(
                         found, tags=[scope_tag_for(scope)] if scope else [], agent=f'{client}-hook', auto=True,
