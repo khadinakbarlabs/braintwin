@@ -61,6 +61,14 @@ Connect an AI tool (pick yours):
 
 Restart the tool after adding it.
 
+Save automatically (Claude Code), so saving never depends on the AI choosing to:
+  Add this to ~/.claude/settings.json (merge with any "hooks" you already have):
+    { "hooks": {
+        "SessionStart":     [ { "hooks": [ { "type": "command", "command": "$HOME_DIR/venv/bin/braintwin-cli hook session-start" } ] } ],
+        "UserPromptSubmit": [ { "hooks": [ { "type": "command", "command": "$HOME_DIR/venv/bin/braintwin-cli hook prompt" } ] } ] } }
+  It files lasting preferences and decisions you type, and starts each session with your memory.
+  It never reads the AI's replies and never makes a paid call. (Codex and Cursor: not set up yet.)
+
 Check it works:
   $HOME_DIR/venv/bin/braintwin-cli health
 

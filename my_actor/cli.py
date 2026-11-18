@@ -11,6 +11,7 @@
                               [--max-items 50]
   python -m my_actor.cli ingest drain [--limit 20] [--allow-actors]
   python -m my_actor.cli ingest status
+  python -m my_actor.cli hook session-start|prompt [--client claude-code]   (run by AI tools as a hook)
 
 Paid scraping (enqueue-actor / drain --allow-actors) is CLI-only on purpose: an agent can
 file memories but can never start spending money. Output is JSON on stdout.
@@ -36,6 +37,7 @@ from .constants import (
     MAX_SCRAPE_ITEMS,
     MAX_SYNC_WRITES,
 )
+from .hooks import run_hook
 from .policy import DEFAULT_POLICY, parse_policy_value
 from .follow import follow_add, follow_list, follow_remove, follow_sync, queue_transcripts
 from .ingest import fetch_text
@@ -114,6 +116,10 @@ def _build_parser() -> argparse.ArgumentParser:
     ft.add_argument('id')
     ft.add_argument('--max-cost', type=float, required=True)
     ft.add_argument('--max-videos', type=int, default=5)
+
+    hk = sub.add_parser('hook', help='for AI coding tools: run as a hook so saving does not depend on the AI (reads hook JSON on stdin)')
+    hk.add_argument('event', choices=['session-start', 'prompt'])
+    hk.add_argument('--client', default='claude-code', help='claude-code, codex or cursor (labels where the memory came from)')
 
     ib = sub.add_parser('inbox', help='owner-only review: list, approve, reject (works in SECOND_BRAIN_APPROVAL=human mode)')
     ibsub = ib.add_subparsers(dest='inbox_command', required=True)
@@ -256,6 +262,11 @@ async def _cmd_policy(brain: BrainStore, args: argparse.Namespace) -> tuple[Any,
     return {'ok': True, 'policy': await brain.set_policy({args.key: value})}, 0
 
 
+async def _cmd_hook(brain: BrainStore, args: argparse.Namespace) -> tuple[Any, int]:
+    raw = '' if sys.stdin.isatty() else sys.stdin.read(200_000)
+    return await run_hook(brain, args.event, args.client, raw), 0  # a hook always exits 0
+
+
 async def _run(args: argparse.Namespace) -> int:
     if args.command == 'move':  # two stores at once, so it does not use the shared one
         payload = await move_memories(args.source, args.target, dry_run=args.dry_run)
@@ -264,7 +275,7 @@ async def _run(args: argparse.Namespace) -> int:
     if args.backend:
         os.environ[ENV_BACKEND] = args.backend
     brain = await get_brain(default_backend=BACKEND_SQLITE)
-    handlers = {'health': _cmd_health, 'export': _cmd_export, 'sync': _cmd_sync, 'ingest': _cmd_ingest, 'follow': _cmd_follow, 'inbox': _cmd_inbox, 'policy': _cmd_policy}
+    handlers = {'health': _cmd_health, 'export': _cmd_export, 'sync': _cmd_sync, 'ingest': _cmd_ingest, 'follow': _cmd_follow, 'inbox': _cmd_inbox, 'policy': _cmd_policy, 'hook': _cmd_hook}
     payload, code = await handlers[args.command](brain, args)
     _emit(payload)
     return code

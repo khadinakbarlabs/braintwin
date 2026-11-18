@@ -18,7 +18,7 @@ import sys
 
 from .brain import BrainStore, get_brain
 from .constants import APPROVAL_AUTO, BACKEND_SQLITE, INGEST_INLINE
-from .tools import build_server, resolve_approval_mode, resolve_ingest_mode
+from .tools import build_server, resolve_approval_mode, resolve_ingest_mode, resolve_toolset
 
 
 async def _brain() -> BrainStore:
@@ -36,6 +36,7 @@ def main() -> None:
         charge=_no_charge,
         ingest_mode=resolve_ingest_mode(INGEST_INLINE),
         approval=resolve_approval_mode(default=APPROVAL_AUTO),  # local: your policy approves safe notes
+        toolset=resolve_toolset(),
     )
     server.run(transport='stdio', show_banner=False)
 

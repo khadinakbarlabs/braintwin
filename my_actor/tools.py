@@ -85,6 +85,32 @@ def resolve_ingest_mode(default: str) -> str:
     return value if value in (INGEST_INLINE, INGEST_QUEUE) else default
 
 
+TOOLSET_CORE = 'core'
+TOOLSET_FULL = 'full'
+ENV_TOOLSET = 'SECOND_BRAIN_TOOLSET'
+# What AI tools see by default: read context, save, search, forget. Everything else
+# (inbox, explain, health, links, followed content) lives in the dashboard and CLI.
+CORE_TOOLS = frozenset({'memory_context', 'memory_capture', 'memory_search', 'memory_forget'})
+
+
+CORE_INSTRUCTIONS = (
+    'Personal memory shared by every agent the owner uses. Use it WITHOUT being asked. At the START '
+    'of every conversation or task call memory_context(query) for what is already known. Whenever '
+    'the user states a lasting preference, decision, instruction or fact about themselves or their '
+    'work, hand their words to memory_capture straight away (it skips what it already knows and '
+    'replaces what changed). Use memory_search to look something up and memory_forget when the '
+    'user asks you to forget something. Links, review and settings are in the owner\'s dashboard. '
+    'Everything you save is kept automatically; only secrets are held back for the owner. '
+    'Never put secrets in memory. Reading is free.'
+)
+
+
+def resolve_toolset(default: str = TOOLSET_CORE) -> str:
+    """`core` (4 tools, the default for real servers) or `full` (all 11, opt-in)."""
+    value = (os.environ.get(ENV_TOOLSET) or '').strip().lower()
+    return value if value in (TOOLSET_CORE, TOOLSET_FULL) else default
+
+
 def resolve_approval_mode(default: str = APPROVAL_HUMAN) -> str:
     """Who approves memories: `human` (owner via CLI), `auto` (owner's policy) or `agent` (opt-in).
 
@@ -112,11 +138,22 @@ def register_tools(
     charge: Charger,
     ingest_mode: str,
     approval: str = APPROVAL_HUMAN,
+    toolset: str = TOOLSET_FULL,
 ) -> None:
     human_only = approval == APPROVAL_HUMAN
     auto_mode = approval == APPROVAL_AUTO
 
-    @server.tool()
+    def tool():
+        """Register a tool unless the `core` toolset hides it from AI tools."""
+
+        def decorate(fn):
+            if toolset == TOOLSET_CORE and fn.__name__ not in CORE_TOOLS:
+                return fn
+            return server.tool()(fn)
+
+        return decorate
+
+    @tool()
     async def memory_propose(
         title: str | None = None,
         content: str | None = None,
@@ -354,7 +391,7 @@ def register_tools(
                     result['message'] = f'Saved {mid}; waiting for the owner ({", ".join(why)}).'
         return _ok(noted(result))
 
-    @server.tool()
+    @tool()
     async def inbox_list() -> dict:
         """
         Use when the owner asks what is waiting for their yes or no. Lists memories that were
@@ -365,7 +402,7 @@ def register_tools(
         result['message'] = f"{result.get('count', 0)} proposed"
         return _ok(result)
 
-    @server.tool()
+    @tool()
     async def inbox_approve(
         memory_id: str | None = None,
         memory_ids: list[str] | None = None,
@@ -419,7 +456,7 @@ def register_tools(
             await charge()
         return _ok(result)
 
-    @server.tool()
+    @tool()
     async def inbox_reject(memory_id: str, reason: str | None = None) -> dict:
         """
         Use when the owner says no to a waiting memory. It leaves the waiting list and is never
@@ -432,7 +469,7 @@ def register_tools(
             await charge()
         return _ok(result)
 
-    @server.tool()
+    @tool()
     async def memory_search(
         query: str,
         approved_only: bool = True,
@@ -464,7 +501,7 @@ def register_tools(
         result['message'] = f"{result.get('count', 0)} hits for {query!r}"
         return _ok(result)
 
-    @server.tool()
+    @tool()
     async def memory_explain(memory_id: str) -> dict:
         """
         Use when a card is not enough and you need the whole memory. Returns the full text,
@@ -479,7 +516,7 @@ def register_tools(
             return _ok({'ok': False, 'error': 'OWNER_ONLY', 'message': 'This memory was forgotten or rejected; only the owner can read it (CLI).'})
         return _ok(result)
 
-    @server.tool()
+    @tool()
     async def memory_forget(memory_id: str, reason: str | None = None) -> dict:
         """
         Use when the owner says something is wrong, out of date or should be forgotten. The
@@ -493,7 +530,7 @@ def register_tools(
             await charge()
         return _ok(result)
 
-    @server.tool()
+    @tool()
     async def brain_health(
         include_sources: bool = True,
         remove_source_id: str | None = None,
@@ -520,7 +557,7 @@ def register_tools(
         )
         return _ok(result)
 
-    @server.tool()
+    @tool()
     async def recent_followed_content(days: int = 7, limit: int = 20, follow_id: str | None = None) -> dict:
         """
         What the owner follows (YouTube channels, blogs, newsletters), newest first: titles,
@@ -533,7 +570,7 @@ def register_tools(
         result['message'] = f"{result.get('count', 0)} followed item(s) in the last {days} day(s)"
         return _ok(result)
 
-    @server.tool()
+    @tool()
     async def memory_context(
         query: str,
         token_budget: int = 1500,
@@ -560,7 +597,7 @@ def register_tools(
         result['message'] = f"{result.get('count', 0)} item(s), about {result.get('approxTokens', 0)} tokens"
         return _ok(result)
 
-    @server.tool()
+    @tool()
     async def memory_capture(
         text: str,
         scope: str | None = None,
@@ -644,9 +681,10 @@ def build_server(
     charge: Charger,
     ingest_mode: str,
     approval: str | None = None,
+    toolset: str = TOOLSET_FULL,
 ) -> FastMCP:
     mode = approval or resolve_approval_mode()
-    instructions = INSTRUCTIONS + (
+    instructions = (CORE_INSTRUCTIONS if toolset == TOOLSET_CORE else INSTRUCTIONS) + (
         ' Approval is owner-only on this server: you can propose, but only the owner can approve.'
         if mode == APPROVAL_HUMAN
         else (
@@ -657,5 +695,5 @@ def build_server(
         )
     )
     server = FastMCP('braintwin', instructions=instructions, version=VERSION)
-    register_tools(server, get_brain=get_brain, charge=charge, ingest_mode=ingest_mode, approval=mode)
+    register_tools(server, get_brain=get_brain, charge=charge, ingest_mode=ingest_mode, approval=mode, toolset=toolset)
     return server
