@@ -1,8 +1,23 @@
-# Braintwin (local)
+# Braintwin
 
-Keep project decisions, preferences, and notes available to the AI tools you use. This package runs Braintwin on your computer. Compatible tools share one local memory file.
+Give your AI tools one place to look up project decisions, preferences and notes. Save “Keep release reports to three bullets” in one connected tool, then ask another for the rule and its memory ID.
 
-**Start here** · [Install](#install) · [Connect an AI tool](#connect-a-tool-by-hand) · [Try it](#check-your-setup) · [Set up automatic saving](#save-automatically)
+## Choose where your memory lives
+
+| Where you want to use Braintwin | Start here |
+| --- | --- |
+| Across web apps, editors and agents, with memories stored in your Apify account | [Sign in with Apify](https://braintwin.dev/app/?signin=1#connect) or [choose your AI tool](https://braintwin.dev/guides/) |
+| On your own machine, with a local SQLite file and no Apify account | [Install the local package](#install), then [connect a tool by hand](#connect-a-tool-by-hand) |
+
+**Cloud setup guides**
+
+| Chat apps | Editors and terminals | Agent workspaces |
+| --- | --- | --- |
+| [ChatGPT](https://braintwin.dev/guides/chatgpt/) | [Cursor](https://braintwin.dev/guides/cursor/) · [VS Code](https://braintwin.dev/guides/vscode/) | [Hermes Agent](https://braintwin.dev/guides/hermes/) |
+| [Claude](https://braintwin.dev/guides/claude/) | [Codex](https://braintwin.dev/guides/codex/) · [Claude Code](https://braintwin.dev/guides/claude-code/) | [OpenClaw](https://braintwin.dev/guides/openclaw/) |
+| [Grok](https://braintwin.dev/guides/grok/) | [OpenCode](https://braintwin.dev/guides/opencode/) · [Grok Build](https://braintwin.dev/guides/grok-build/) · [Gemini CLI](https://braintwin.dev/guides/gemini-cli/) | [Muse Code](https://braintwin.dev/guides/muse/) |
+
+Cursor and VS Code have install buttons. Other guides give the connector address, terminal command or settings for that app. Authorize each cloud client with the same Apify account. In a new conversation, ask **“Which Braintwin memory tools can you use?”** to check discovery before saving a note. The local package and cloud server keep separate stores until you [move or copy your memories](#move-your-memory-to-the-cloud-or-back).
 
 ## Install
 
@@ -14,7 +29,7 @@ cd braintwin
 bash install.sh
 ```
 
-The installer sets up Braintwin in `~/.braintwin` and prints the full path to the MCP executable. A local setup needs no Apify account. Use the [hosted dashboard](https://braintwin.dev/) if you want your memory in Apify.
+The installer sets up Braintwin in `~/.braintwin` and prints the full path to the MCP executable. A local setup needs no Apify account. Once connected, [check your setup](#check-your-setup) or [enable automatic saving](#save-automatically).
 
 ## Connect a tool by hand
 
@@ -58,7 +73,7 @@ mcp_servers:
 
 ### OpenClaw
 
-On the machine that runs your Gateway, add the server and check its tools. The address in `command` must exist on that machine.
+Use an OpenClaw Gateway release that supports outbound MCP servers and the reload and probe commands. Run these on the Gateway machine. The executable path must exist on that machine.
 
 ```bash
 openclaw mcp set braintwin '{"command":"/FULL/PATH/TO/braintwin","args":[]}'
@@ -68,10 +83,18 @@ openclaw mcp probe braintwin
 
 ### OpenCode
 
-Run the setup command, then open a new session and check `/mcps`.
+Merge this entry into your OpenCode configuration and restart the session. Run `opencode mcp list` to check the server status.
+
+```json
+{ "mcp": { "braintwin": { "type": "local", "command": ["/FULL/PATH/TO/braintwin"], "enabled": true } } }
+```
+
+### Gemini CLI
+
+Run this in your terminal, using the executable path from the installer. Enter `/mcp list` in a new Gemini CLI session to check the server.
 
 ```bash
-opencode mcp add braintwin --global -- "/FULL/PATH/TO/braintwin"
+gemini mcp add --scope user braintwin "/FULL/PATH/TO/braintwin"
 ```
 
 ### Muse Code
