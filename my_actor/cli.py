@@ -122,6 +122,18 @@ def _build_parser() -> argparse.ArgumentParser:
     hk.add_argument('event', choices=['session-start', 'prompt'])
     hk.add_argument('--client', choices=CLIENTS, default='claude-code', help='AI tool that invoked the hook')
 
+    hk.add_argument('--installed', action='store_true', help='honor the current native connector registration')
+    for name in ('connect', 'disconnect', 'connection-status'):
+        setup = sub.add_parser(name, help=f'{name} a personal automatic memory connection')
+        setup.add_argument('client', choices=CLIENTS)
+        if name == 'connect':
+            setup.add_argument('--storage', choices=('local', 'apify'), default='local')
+    sub.add_parser('connector-logout', help='remove the connector authorization from the system keyring')
+    serve = sub.add_parser('serve', help='start the installed MCP connection')
+    serve.add_argument('--storage', choices=('local', 'apify'), required=True)
+    serve.add_argument('--database')
+    serve.add_argument('--account')
+
     ib = sub.add_parser('inbox', help='owner-only review: list, approve, reject (works in BRAINTWIN_APPROVAL=human mode)')
     ibsub = ib.add_subparsers(dest='inbox_command', required=True)
     ibsub.add_parser('list')
@@ -268,7 +280,21 @@ async def _cmd_hook(args: argparse.Namespace) -> dict[str, Any]:
         raw = '' if sys.stdin.isatty() else sys.stdin.read(200_001)
         if len(raw) > 200_000:
             return empty_output(args.event, args.client)
-        # Prompt hooks use the local database regardless of the regular CLI backend.
+        if args.installed:
+            from .connections import binary, current_target
+            target = current_target(args.client, binary())
+            if target is None:
+                return empty_output(args.event, args.client)
+            storage, value = target
+            if storage == 'apify':
+                from .cloud_connector import handle_prompt, record_result
+                if args.event == 'prompt':
+                    from .hooks import _payload
+                    receipt = await handle_prompt(args.client, value, _payload(raw))
+                    if receipt:
+                        record_result(args.client, value, receipt)
+                return empty_output(args.event, args.client)
+            os.environ['BRAINTWIN_SQLITE'] = value
         with sqlite_transaction() as (kv, audit):
             brain = BrainStore(kv=kv, audit=audit)
             await brain.init()
@@ -297,6 +323,41 @@ async def _run(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
+    if args.command in {'connect', 'disconnect', 'connection-status', 'serve', 'connector-logout'}:
+        from .connections import SetupError, binary, configure, current_target
+        from .connector_auth import authorize, logout
+        try:
+            if args.command == 'serve':
+                if args.storage == 'apify' and args.account:
+                    from .cloud_connector import serve
+                    serve(args.account)
+                elif args.storage == 'local' and args.database:
+                    os.environ[ENV_BACKEND] = BACKEND_SQLITE
+                    os.environ['BRAINTWIN_SQLITE'] = args.database
+                    from .stdio import main as serve_local
+                    serve_local()
+                else:
+                    raise SetupError('The connector has an incomplete storage configuration.')
+                return 0
+            if args.command == 'connector-logout':
+                logout()
+                result = {'ok': True, 'signedOut': True}
+            elif args.command == 'connection-status':
+                target = current_target(args.client, binary())
+                result = {'client': args.client, 'configured': bool(target), 'storage': target[0] if target else None}
+                if target and target[0] == 'apify':
+                    from .cloud_connector import last_result
+                    result['lastSave'] = last_result(args.client, target[1])
+            else:
+                result = configure(args.client, binary(), getattr(args, 'storage', 'local'),
+                                   remove=args.command == 'disconnect', authorize=authorize)
+            _emit(result)
+            return 0
+        except (SetupError, OSError) as exc:
+            print(str(exc), file=sys.stderr)
+        except Exception:
+            print('Connection setup could not finish. Check your network, personal settings and system keyring.', file=sys.stderr)
+        return 2
     return asyncio.run(_run(args))
 
 

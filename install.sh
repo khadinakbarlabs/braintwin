@@ -1,15 +1,28 @@
 #!/usr/bin/env bash
 # Braintwin: one-step install for your own computer.
-# Installs into ~/.braintwin (its own private Python environment) and prints
-# the lines to paste into your AI tool. Nothing is sent anywhere.
+# Installs into a private Python environment and optionally configures one named client.
 set -euo pipefail
+umask 077
 
 HOME_DIR="${BRAINTWIN_HOME:-$HOME/.braintwin}"
 REPO_URL="${BRAINTWIN_REPO:-https://github.com/khadinakbarlabs/braintwin.git}"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || true)"
+SCRIPT_DIR=""
+if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
 
 say() { printf '%s\n' "$*"; }
 fail() { printf 'Braintwin install stopped: %s\n' "$*" >&2; exit 1; }
+
+CLIENT="${1:-}"
+STORAGE="${3:-local}"
+if [ "$#" -gt 0 ]; then
+  case "$CLIENT" in claude-code|codex|cursor|gemini-cli) ;; *) fail "choose claude-code, codex, cursor or gemini-cli." ;; esac
+  if [ "$#" -ne 1 ] && { [ "$#" -ne 3 ] || [ "$2" != "--storage" ]; }; then
+    fail "use install.sh CLIENT [--storage local|apify]."
+  fi
+  case "$STORAGE" in local|apify) ;; *) fail "choose local or apify storage." ;; esac
+fi
 
 PY=""
 for candidate in python3.13 python3.12 python3.11 python3; do
@@ -40,59 +53,27 @@ mkdir -p "$HOME_DIR"
 BIN="$HOME_DIR/venv/bin/braintwin"
 [ -x "$BIN" ] || fail "the install finished but $BIN is missing."
 
-MEMORY_PATH=$("$HOME_DIR/venv/bin/python" -c 'from my_actor.storage import default_sqlite_path; print(default_sqlite_path())')
-cat <<EOF
-
-Braintwin is installed.
-
-Your memories live in one private file on this computer:
-  $MEMORY_PATH
-
-Connect an AI tool (pick yours):
-
-  Claude Code:
-    claude mcp add braintwin -- $BIN
-
-  Cursor (~/.cursor/mcp.json) and Claude Desktop (claude_desktop_config.json):
-    { "mcpServers": { "braintwin": { "command": "$BIN" } } }
-
-  Codex (~/.codex/config.toml):
-    [mcp_servers.braintwin]
-    command = "$BIN"
-
-Restart the tool after adding it.
-
-Save automatically with Claude Code, Codex or Cursor:
-  Merge the matching snippet below with the hooks you already use.
-  After adding Codex hooks, review and trust the new commands in /hooks.
-  Hooks use the local memory file and only look for lasting facts in your typed prompts.
-
-EOF
-
-"$HOME_DIR/venv/bin/python" - "$HOME_DIR/venv/bin/braintwin-cli" <<'PYTHON'
-import json
-import shlex
-import sys
-
-binary = shlex.quote(sys.argv[1])
-for client, path, start, prompt in (
-    ('claude-code', '~/.claude/settings.json', 'SessionStart', 'UserPromptSubmit'),
-    ('codex', '~/.codex/hooks.json', 'SessionStart', 'UserPromptSubmit'),
-    ('cursor', '~/.cursor/hooks.json', 'sessionStart', 'beforeSubmitPrompt'),
-):
-    config = {'version': 1} if client == 'cursor' else {}
-    hooks = {}
-    for name, event in ((start, 'session-start'), (prompt, 'prompt')):
-        command = {'command': f'{binary} hook {event} --client {client}'}
-        hooks[name] = [command] if client == 'cursor' else [{'hooks': [{'type': 'command', **command}]}]
-    config['hooks'] = hooks
-    print(f'  {path}\n{json.dumps(config, indent=2)}\n')
-PYTHON
-
-cat <<EOF
-Check it works:
-  $HOME_DIR/venv/bin/braintwin-cli health
-
-Update later: run this installer again.
-Remove: delete $HOME_DIR (your memories are stored at $MEMORY_PATH).
-EOF
+CLI="$HOME_DIR/venv/bin/braintwin-cli"
+if [ -n "$CLIENT" ]; then
+  if [ "$STORAGE" = apify ]; then
+    say "Selected preferences and decisions will go to your Apify account. Hosted memory charges apply."
+    say "Anyone with an active Actor container URL can access its store. Choose local storage for sensitive memories."
+    say "Apify requests full API access. Your system keyring holds the authorization."
+  fi
+  "$CLI" connect "$CLIENT" --storage "$STORAGE"
+  say "Restart $CLIENT and allow its Braintwin hooks when prompted."
+  if [ "$CLIENT" = codex ]; then say "In Codex, open /hooks and review the Braintwin commands."; fi
+  say 'Try a normal message: I prefer weekly status reports on Fridays.'
+  if [ "$STORAGE" = apify ]; then
+    say "Open Memories or Waiting for review at https://braintwin.dev/app/ with the same account."
+    say "See the last eligible save: $CLI connection-status $CLIENT"
+  else
+    say "In a new session in the same project, ask: When do I prefer weekly reports?"
+  fi
+  say "Disconnect: $CLI disconnect $CLIENT"
+else
+  say "Braintwin is installed. Add your connector and automatic saving together (choose your tool):"
+  for tool in claude-code codex cursor gemini-cli; do say "  $CLI connect $tool"; done
+  say "For an Apify account, add --storage apify. For manual MCP setup, the executable is $BIN."
+  say "Setup guides: https://braintwin.dev/guides/"
+fi

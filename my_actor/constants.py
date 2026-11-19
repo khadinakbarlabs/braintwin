@@ -1,6 +1,6 @@
 """Fixed store names, key prefixes and tunables for the personal Braintwin store."""
 
-VERSION = '0.33.0'
+VERSION = '0.33.1'
 
 CONNECTION_PATH = '/api/connection'
 READINESS_HEADER = b'x-apify-container-server-readiness-probe'

@@ -11,20 +11,23 @@ import os
 from typing import Any
 
 from .brain import BrainStore, scope_tag_for
-from .capture import extract_candidates, user_turns
+from .constants import APPROVAL_AUTO, ENV_APPROVAL
+from .brand import env_value
+from .capture import capture_declined, extract_candidates, user_turns
 from .context_pack import FENCE, _line
 from .ranking import is_expired
 from .policy import contains_secret, contains_sensitive_id, normalize_text
 
 logger = logging.getLogger(__name__)
 
-CLIENTS = ('claude-code', 'codex', 'cursor')
+CLIENTS = ('claude-code', 'codex', 'cursor', 'gemini-cli')
 CONTEXT_TOKENS = 1200
 MAX_PROMPT_CHARS = 8000
 
 EVENT_NAMES = {
     'claude-code': {'session-start': 'SessionStart', 'prompt': 'UserPromptSubmit'},
     'codex': {'session-start': 'SessionStart', 'prompt': 'UserPromptSubmit'},
+    'gemini-cli': {'session-start': 'SessionStart', 'prompt': 'BeforeAgent'},
     'cursor': {'session-start': 'sessionStart', 'prompt': 'beforeSubmitPrompt'},
 }
 
@@ -77,6 +80,22 @@ async def _session_context(brain: BrainStore, scope: str) -> str:
     return '\n'.join(lines) if len(lines) > 1 else ''
 
 
+def prompt_candidates(client: str, data: dict[str, Any]) -> list[dict[str, Any]]:
+    event = EVENT_NAMES.get(client, {}).get('prompt')
+    if not event or data.get('hook_event_name', event) != event or data.get('is_background_agent') is True:
+        return []
+    text = data.get('prompt')
+    if not isinstance(text, str) or not text.strip():
+        return []
+    # Inspect the full submitted turn before truncating text for extraction.
+    normalized = normalize_text(text)
+    if capture_declined(normalized) or contains_secret(normalized) or contains_sensitive_id(normalized):
+        return []
+    turns = user_turns(text)
+    user_text = '\n'.join(turns) if turns is not None else text
+    return extract_candidates(user_text[:MAX_PROMPT_CHARS])
+
+
 async def run_hook(
     brain: BrainStore, event: str, client: str, raw_stdin: str, *, raise_on_error: bool = False,
 ) -> dict[str, Any]:
@@ -95,18 +114,13 @@ async def run_hook(
                     return {'additional_context': text}
                 return {'hookSpecificOutput': {'hookEventName': expected, 'additionalContext': text}}
         else:
-            text = data.get('prompt')
-            if isinstance(text, str) and text.strip():
-                text = text[:MAX_PROMPT_CHARS]
-                turns = user_turns(text)
-                user_text = '\n'.join(turns) if turns is not None else text
-                normalized = normalize_text(user_text)
-                found = [] if contains_secret(normalized) or contains_sensitive_id(normalized) else extract_candidates(user_text)
-                if found:
-                    await brain.save_captured(
-                        found, tags=[scope_tag_for(scope)] if scope else [], agent=f'{client}-hook', auto=True,
-                        situation=f'Working in {name}' if name else 'Working in an AI coding tool',
-                    )
+            found = prompt_candidates(client, data)
+            if found:
+                await brain.save_captured(
+                    found, tags=[scope_tag_for(scope)] if scope else [], agent=f'{client}-hook',
+                    auto=(env_value(ENV_APPROVAL) or APPROVAL_AUTO).strip().lower() == APPROVAL_AUTO,
+                    situation=f'Working in {name}' if name else 'Working in an AI coding tool',
+                )
     except Exception as exc:  # noqa: BLE001 - the host must run even if memory fails
         if raise_on_error:
             raise  # the CLI rolls the transaction back before returning an empty result

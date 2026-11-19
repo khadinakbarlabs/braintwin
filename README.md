@@ -2,12 +2,14 @@
 
 Give your AI tools one place to look up project decisions, preferences and notes. Save “Keep release reports to three bullets” in one connected tool, then ask another for the rule and its memory ID.
 
+**Want your agent to save without being asked?** Choose the automatic setup for [Claude Code](https://braintwin.dev/guides/claude-code/), [Codex](https://braintwin.dev/guides/codex/), [Cursor](https://braintwin.dev/guides/cursor/) or [Gemini CLI](https://braintwin.dev/guides/gemini-cli/). One setup adds both the memory tools and the prompt handler. The standard connector in web chats leaves tool use to the app.
+
 ## Choose where your memory lives
 
 | Where you want to use Braintwin | Start here |
 | --- | --- |
 | Across web apps, editors and agents, with memories stored in your Apify account | [Sign in with Apify](https://braintwin.dev/app/?signin=1#connect) or [choose your AI tool](https://braintwin.dev/guides/) |
-| On your own machine, with a local SQLite file and no Apify account | [Install the local package](#install), then [connect a tool by hand](#connect-a-tool-by-hand) |
+| On your own machine, with a local SQLite file and no Apify account | [Choose automatic saving](#save-automatically) or [connect a tool by hand](#connect-a-tool-by-hand) |
 
 **Cloud setup guides**
 
@@ -40,7 +42,7 @@ cd braintwin
 bash install.sh
 ```
 
-The installer sets up Braintwin in `~/.braintwin` and prints the full path to the MCP executable. A local setup needs no Apify account. Once connected, [check your setup](#check-your-setup) or [enable automatic saving](#save-automatically).
+The installer sets up Braintwin in `~/.braintwin`. Supply an agent name, such as `bash install.sh cursor`, to register automatic saving in the same step. A local setup needs no Apify account. Once connected, [check your setup](#check-your-setup) or [enable automatic saving](#save-automatically).
 
 ## Connect a tool by hand
 
@@ -130,51 +132,34 @@ Use **MCP: Open User Configuration** from the Command Palette and add this serve
 
 ## Save automatically
 
-The installer prints the setup for Claude Code, Codex and Cursor. Add the matching
-snippet to your existing settings and keep your other hooks. Replace
-`/FULL/PATH/TO/.braintwin/venv/bin/braintwin-cli` with the path from the installer.
-These hooks keep facts from your typed prompts in the local database. They use
-built-in rules and read neither replies nor attachments. Session start gives the
-selected AI tool a short set of relevant memories.
+In **Claude Code**, **Codex**, **Cursor** and **Gemini CLI**, one command adds the connector and registers it with the app’s prompt events. Pick your app and where to save. On macOS or Linux with Git and Python 3.11+, run the command from its [setup guide](https://braintwin.dev/guides/), or from this repository:
 
-**Claude Code** (`~/.claude/settings.json`):
-
-```json
-{
-  "hooks": {
-    "SessionStart": [{ "hooks": [{ "type": "command", "command": "'/FULL/PATH/TO/.braintwin/venv/bin/braintwin-cli' hook session-start --client claude-code" }] }],
-    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "'/FULL/PATH/TO/.braintwin/venv/bin/braintwin-cli' hook prompt --client claude-code" }] }]
-  }
-}
+```bash
+bash install.sh cursor
 ```
 
-**Codex** (`~/.codex/hooks.json`):
+Replace `cursor` with `claude-code`, `codex` or `gemini-cli`. This default keeps memories on your computer. Restart the app and allow its Braintwin hooks. In Codex, review them in `/hooks`. Some managed workspaces require an administrator to enable hooks.
 
-```json
-{
-  "hooks": {
-    "SessionStart": [{ "hooks": [{ "type": "command", "command": "'/FULL/PATH/TO/.braintwin/venv/bin/braintwin-cli' hook session-start --client codex" }] }],
-    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "'/FULL/PATH/TO/.braintwin/venv/bin/braintwin-cli' hook prompt --client codex" }] }]
-  }
-}
+To save into the account you use for the dashboard, select Apify during setup:
+
+```bash
+bash install.sh cursor --storage apify
 ```
 
-After adding the commands, review and trust them with `/hooks` in Codex.
+Apify opens its consent page once. The installed connector and its prompt handler share that account. Apify requests full API access. Braintwin keeps the authorization in macOS Keychain or Linux Secret Service. Hosted saves use the Actor’s published rates. The current Actor’s separate container URL can expose its memory service while a run is active. Choose local storage for sensitive work.
 
-**Cursor** (`~/.cursor/hooks.json`):
+Try it with an ordinary message. **“I prefer weekly status reports on Fridays.”** In a fresh conversation in the same project, ask **“When do I prefer weekly reports?”** An Apify save also appears in your dashboard’s Memories or Waiting for review. Local saves stay on the computer. Your other local agents can recall them when they use the same file.
 
-```json
-{
-  "version": 1,
-  "hooks": {
-    "sessionStart": [{ "command": "'/FULL/PATH/TO/.braintwin/venv/bin/braintwin-cli' hook session-start --client cursor" }],
-    "beforeSubmitPrompt": [{ "command": "'/FULL/PATH/TO/.braintwin/venv/bin/braintwin-cli' hook prompt --client cursor" }]
-  }
-}
+Braintwin checks the submitted text for lasting statements, skips recognized credentials and explicit requests such as “don’t save this,” and respects the owner’s review policy. It reads the typed prompt field. Hosted automatic capture sends the selected sentences with the agent and project labels. A connection failure can leave a save unconfirmed. Check the receipt and search your memories before trying again.
+
+```bash
+~/.braintwin/venv/bin/braintwin-cli connection-status cursor
+~/.braintwin/venv/bin/braintwin-cli disconnect cursor
 ```
 
-To turn automatic saving off, remove the Braintwin prompt hook from that tool's
-settings. Remove the session-start hook too if you want to stop loading memories.
+Disconnecting stops the installed callbacks for that app. You can run the installer again later. To change storage, disconnect first and rerun your chosen setup. To clear the installed connector’s local Apify authorization, run `braintwin-cli connector-logout` from the same directory. You can also revoke access in Apify.
+
+A standard MCP URL gives ChatGPT, Claude web, Grok and other connected apps memory tools. Each host chooses when to call them and when to ask for approval. An explicit “Save this in Braintwin” is the most reliable way to request a save in those apps.
 
 ## Check your setup
 
@@ -188,7 +173,7 @@ Try the terminal health check to confirm the local store opens:
 ~/.braintwin/venv/bin/braintwin-cli health
 ```
 
-Automatic saving is optional and has separate setup for Claude Code, Codex, and Cursor. The other guides connect the four memory tools. You can ask those agents to save and recall directly.
+For the automatic setup, use the ordinary preference example above. This explicit save-and-search check also works in tool-only clients.
 
 ## Where your memory lives
 
@@ -222,7 +207,7 @@ is free.
 ## Update or remove
 
 - Update: run the install command again.
-- Remove: delete `~/.braintwin`. Your memories stay in `~/.local/share/braintwin` until you delete
+- Before removal, run `braintwin-cli disconnect` for each installed agent and `braintwin-cli connector-logout` if you connected Apify. Then delete `~/.braintwin`. Your memories stay in `~/.local/share/braintwin` until you delete
   that folder too.
 
 ## Licence
