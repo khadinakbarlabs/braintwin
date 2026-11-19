@@ -1,47 +1,97 @@
 # Braintwin (local)
 
-One memory for all your AI tools, running on your own computer.
+Keep project decisions, preferences, and notes available to the AI tools you use. This package runs Braintwin on your computer. Compatible tools share one local memory file.
 
-Braintwin gives Claude Code, Cursor, Codex, Claude Desktop and other tools a shared
-memory. Tell one of them something once and the others know it too. This version runs
-entirely on your machine: your memories sit in one private file, nothing is sent to a
-server, and there is no charge.
+**Start here** · [Install](#install) · [Connect an AI tool](#connect-a-tool-by-hand) · [Try it](#check-your-setup) · [Set up automatic saving](#save-automatically)
 
 ## Install
 
-You need Python 3.11 or newer.
+Use Python 3.11 or newer. Clone the repository and run the installer from its folder:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/khadinakbarlabs/braintwin/main/install.sh | bash
+git clone https://github.com/khadinakbarlabs/braintwin.git
+cd braintwin
+bash install.sh
 ```
 
-Or download this repository and run `./install.sh` inside it.
-
-The installer creates `~/.braintwin`, installs Braintwin there, and prints the exact
-line to paste into each AI tool. Restart the tool afterwards.
+The installer sets up Braintwin in `~/.braintwin` and prints the full path to the MCP executable. A local setup needs no Apify account. Use the [hosted dashboard](https://braintwin.dev/) if you want your memory in Apify.
 
 ## Connect a tool by hand
 
-The installer prints these with the right path filled in.
+Copy the full executable path printed by the installer. Replace `/FULL/PATH/TO/braintwin` with it in the examples below. If you already have an MCP configuration, merge in the `braintwin` entry and keep the others. Restart the client after saving.
 
-**Claude Code**
+### Cursor and Claude Desktop
 
-```bash
-claude mcp add braintwin -- ~/.braintwin/venv/bin/braintwin
-```
-
-**Cursor** (`~/.cursor/mcp.json`) and **Claude Desktop** (`claude_desktop_config.json`).
-Use the full path the installer printed, not `~`:
+In Cursor, open your personal `~/.cursor/mcp.json`. In Claude Desktop, use **Settings → Developer → Edit Config**. Merge this JSON into the existing file.
 
 ```json
-{ "mcpServers": { "braintwin": { "command": "/FULL/PATH/TO/.braintwin/venv/bin/braintwin" } } }
+{ "mcpServers": { "braintwin": { "command": "/FULL/PATH/TO/braintwin" } } }
 ```
 
-**Codex** (`~/.codex/config.toml`)
+### Codex and Grok Build
+
+Use `~/.codex/config.toml` for Codex or `~/.grok/config.toml` for Grok Build. Check `/mcp` in Codex or run `grok mcp doctor braintwin`.
 
 ```toml
 [mcp_servers.braintwin]
-command = "/FULL/PATH/TO/.braintwin/venv/bin/braintwin"
+command = "/FULL/PATH/TO/braintwin"
+```
+
+### Claude Code
+
+Run this in a terminal. Check `/mcp` in Claude Code afterwards.
+
+```bash
+claude mcp add --scope user braintwin -- "/FULL/PATH/TO/braintwin"
+```
+
+### Hermes Agent
+
+Open the `config.yaml` for your Hermes profile and add the entry under `mcp_servers`.
+
+```yaml
+mcp_servers:
+  braintwin:
+    command: "/FULL/PATH/TO/braintwin"
+    args: []
+```
+
+### OpenClaw
+
+On the machine that runs your Gateway, add the server and check its tools. The address in `command` must exist on that machine.
+
+```bash
+openclaw mcp set braintwin '{"command":"/FULL/PATH/TO/braintwin","args":[]}'
+openclaw mcp reload
+openclaw mcp probe braintwin
+```
+
+### OpenCode
+
+Run the setup command, then open a new session and check `/mcps`.
+
+```bash
+opencode mcp add braintwin --global -- "/FULL/PATH/TO/braintwin"
+```
+
+### Muse Code
+
+Add the server to `~/.config/muse/settings.json`. Open Muse Code and run `/mcp`.
+
+```json
+{
+  "mcp_servers": {
+    "braintwin": { "transport": "stdio", "command": "/FULL/PATH/TO/braintwin", "args": [], "mode": "optional" }
+  }
+}
+```
+
+### VS Code
+
+Use **MCP: Open User Configuration** from the Command Palette and add this server. Start it with **MCP: List Servers** and try a request in Agent mode.
+
+```json
+{ "servers": { "braintwin": { "type": "stdio", "command": "/FULL/PATH/TO/braintwin" } } }
 ```
 
 ## Save automatically
@@ -94,10 +144,17 @@ settings. Remove the session-start hook too if you want to stop loading memories
 
 ## Check your setup
 
-In a connected client, ask Braintwin to save a lasting preference. In a second client using
-the same database, ask it to recall the preference and return its memory ID. For hosted
-Braintwin, the [dashboard Connect page](https://braintwin.dev/app/#connect) provides a
-client-specific snippet, a store check and separate prompts for verifying a save and recall.
+1. In your first agent, say “Use Braintwin to remember that my weekly report starts with a revenue summary.”
+2. In a new chat or a second agent on the same machine, say “Use Braintwin to find my weekly report preference.”
+3. If recall is empty, confirm Braintwin appears in both agents’ MCP lists and both use the same local memory file.
+
+Try the terminal health check to confirm the local store opens:
+
+```bash
+~/.braintwin/venv/bin/braintwin-cli health
+```
+
+Automatic saving is optional and has separate setup for Claude Code, Codex, and Cursor. The other guides connect the four memory tools. You can ask those agents to save and recall directly.
 
 ## Where your memory lives
 
