@@ -19,6 +19,17 @@ Give your AI tools one place to look up project decisions, preferences and notes
 
 Cursor and VS Code have install buttons. Other guides give the connector address, terminal command or settings for that app. Authorize each cloud client with the same Apify account. In a new conversation, ask **“Which Braintwin memory tools can you use?”** to check discovery before saving a note. The local package and cloud server keep separate stores until you [move or copy your memories](#move-your-memory-to-the-cloud-or-back).
 
+## Use the cloud dashboard
+
+| What you want to do | Where to go |
+| --- | --- |
+| Follow a YouTube channel, news site, blog, newsletter or feed | Choose a source type, paste its address and preview the review policy and check frequency. [Sources](https://braintwin.dev/app/#follow) |
+| See what was saved and why | Open a project in the map, then choose notes, agent work or a source to see the underlying memories. [Memory map](https://braintwin.dev/app/#library) |
+| Check an agent setup | Pick your agent and follow its verification prompt. Active records the last successful setup check. Remove the connector inside the client to disconnect it. [Connections](https://braintwin.dev/app/#connect) |
+| Use your own AI account | Choose OpenAI, Anthropic, Google Gemini or Mistral, a model and a purpose. Drafting sends the selected passage to the provider and lets you edit the result before saving. The draft key lasts until the tab reloads or you sign out. [AI providers](https://braintwin.dev/app/#providers) |
+
+Cloud sign-in uses Apify. The current hosted Actor also exposes a separate URL for each running container. Anyone who obtains that URL can reach its memory service while the run is active. Keep it private and use the local package for sensitive memories.
+
 ## Install
 
 Use Python 3.11 or newer. Clone the repository and run the installer from its folder:
