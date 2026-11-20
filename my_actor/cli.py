@@ -133,6 +133,7 @@ def _build_parser() -> argparse.ArgumentParser:
     serve.add_argument('--storage', choices=('local', 'apify'), required=True)
     serve.add_argument('--database')
     serve.add_argument('--account')
+    serve.add_argument('--client', choices=CLIENTS)
 
     ib = sub.add_parser('inbox', help='owner-only review: list, approve, reject (works in BRAINTWIN_APPROVAL=human mode)')
     ibsub = ib.add_subparsers(dest='inbox_command', required=True)
@@ -287,12 +288,10 @@ async def _cmd_hook(args: argparse.Namespace) -> dict[str, Any]:
                 return empty_output(args.event, args.client)
             storage, value = target
             if storage == 'apify':
-                from .cloud_connector import handle_prompt, record_result
                 if args.event == 'prompt':
+                    from .cloud_connector import dispatch_prompt
                     from .hooks import _payload
-                    receipt = await handle_prompt(args.client, value, _payload(raw))
-                    if receipt:
-                        record_result(args.client, value, receipt)
+                    dispatch_prompt(args.client, value, _payload(raw), binary())
                 return empty_output(args.event, args.client)
             os.environ['BRAINTWIN_SQLITE'] = value
         with sqlite_transaction() as (kv, audit):
@@ -330,7 +329,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.command == 'serve':
                 if args.storage == 'apify' and args.account:
                     from .cloud_connector import serve
-                    serve(args.account)
+                    serve(args.account, args.client)
                 elif args.storage == 'local' and args.database:
                     os.environ[ENV_BACKEND] = BACKEND_SQLITE
                     os.environ['BRAINTWIN_SQLITE'] = args.database

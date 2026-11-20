@@ -138,6 +138,8 @@ def _target(entry, cli):
     if not isinstance(entry, dict) or entry.get('command') != str(cli):
         return None
     args = list(entry.get('args') or [])
+    if len(args) == 7 and args[5] == '--client' and args[6] in EVENT_NAMES:
+        args = args[:5]
     if len(args) == 5 and args[:2] == ['serve', '--storage']:
         mode, flag, value = args[2:]
         if isinstance(value, str) and value and (mode, flag) in {('local', '--database'), ('apify', '--account')}:
@@ -235,6 +237,8 @@ def configure(client, cli, mode='local', *, remove=False, authorize=None):
             flag = '--account' if mode == 'apify' else '--database'
             entry = prior if ours else {k: prior[k] for k in ('enabled', 'disabled') if remote and k in prior}
             entry.update({'command': str(cli), 'args': ['serve', '--storage', mode, flag, value]})
+            if mode == 'apify':
+                entry['args'] += ['--client', client]
             if not ours:
                 group['braintwin'] = entry
         _commit([server] if server is hook else [server, hook])

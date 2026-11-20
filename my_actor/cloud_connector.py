@@ -3,9 +3,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import hashlib
+import os
+import subprocess
+import sys
+import time
+import uuid
 from datetime import UTC, datetime
 
-from .connections import SetupError, put_file, state_dir
+from .connections import SetupError, locked, put_file, state_dir
 from .hooks import _workspace, prompt_candidates
 
 GATEWAY = 'https://khadinakbar--braintwin.apify.actor/mcp'
@@ -33,10 +39,18 @@ def remote_client(account):
     return ProxyClient(transport, forward_incoming_headers=False, mode='legacy', timeout=18)
 
 
-def serve(account):
+def serve(account, client_name=None):
     from fastmcp.server import create_proxy
     from .tools import CORE_INSTRUCTIONS
-    create_proxy(remote_client(account), name='Braintwin', instructions=CORE_INSTRUCTIONS).run(transport='stdio', show_banner=False)
+    from .native_tools import NativeMemoryResults
+    instructions = CORE_INSTRUCTIONS
+    if client_name:
+        instructions += (' This native installation checks submitted user messages for lasting preferences and decisions. '
+                         'Let the prompt hook capture those statements. Continue the conversation quietly. '
+                         'Use the capture tool for explicit requests or additional facts the hook does not handle.')
+    server = create_proxy(remote_client(account), name='Braintwin', instructions=instructions)
+    server.add_middleware(NativeMemoryResults(account, client_name))
+    server.run(transport='stdio', show_banner=False)
 
 
 async def send_capture(owner, arguments):
@@ -51,14 +65,84 @@ async def send_capture(owner, arguments):
     return data
 
 
-async def handle_prompt(client, owner, data, *, send=send_capture):
+def capture_job(client, data):
     candidates = prompt_candidates(client, data)
     if not candidates:
         return None
     _, scope = _workspace(data)
-    args = {'text': '\n'.join(row['content'] for row in candidates), 'agent': client + '-hook', 'kind': 'user'}
+    job = {'text': '\n'.join(row['content'] for row in candidates), 'agent': client + '-hook', 'kind': 'user'}
     if scope:
-        args['scope'] = scope
+        job['scope'] = scope
+    return job
+
+
+def _fingerprint(value):
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
+def _marker(client, owner, scope):
+    return state_dir() / ('turn-' + _fingerprint(json.dumps([client, owner, scope])) + '.json')
+
+
+def mark_automatic(client, owner, job, outcome, turn=None):
+    scope = job.get('scope')
+    if not scope:
+        return True
+    path = _marker(client, owner, scope)
+    now = time.time()
+    with locked('capture-status'):
+        recent = json.loads(path.read_text()) if path.exists() else {}
+        recent = {digest: row for digest, row in recent.items() if 0 <= now - row['time'] < 90}
+        prior = recent.get(_fingerprint(job['text'].strip()), {})
+        if outcome == 'pending' and prior.get('outcome') in {'pending','saved','waiting','already-known','unconfirmed'}:
+            return False
+        for sentence in [job['text'], *job['text'].splitlines()]:
+            digest = _fingerprint(sentence.strip())
+            if outcome == 'pending' or recent.get(digest, {}).get('turn') == turn:
+                recent[digest] = {'turn': turn, 'time': now, 'outcome': outcome}
+        put_file(path, json.dumps(recent).encode())
+    return True
+
+
+def automatic_status(client, owner, scope, text):
+    if not client or not scope or not isinstance(text, str):
+        return None
+    try:
+        digest = _fingerprint(text.strip())
+        row = json.loads(_marker(client, owner, scope).read_text())[digest]
+        if (0 <= time.time() - row['time'] < 90
+                and row['outcome'] in {'pending','saved','waiting','already-known','unconfirmed'}):
+            return row['outcome']
+    except (OSError, ValueError, KeyError):
+        pass
+    return None
+
+
+def dispatch_prompt(client, owner, data, cli):
+    job = capture_job(client, data)
+    if not job:
+        return
+    turn = uuid.uuid4().hex
+    packet = json.dumps([client, owner, job, turn, str(cli)]).encode()
+    if not mark_automatic(client, owner, job, 'pending', turn):
+        return
+    try:
+        process = subprocess.Popen([sys.executable, '-I', '-m', 'my_actor.capture_worker'],
+                                   stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL, start_new_session=True)
+        with process.stdin as pipe:
+            pipe.write(packet)
+    except OSError:
+        mark_automatic(client, owner, job, 'failed', turn)
+        record_result(client, owner, {'outcome':'unconfirmed'})
+
+
+async def handle_prompt(client, owner, data, *, send=send_capture):
+    args = capture_job(client, data)
+    return await deliver(owner, args, send) if args else None
+
+
+async def deliver(owner, args, send=send_capture):
     try:
         result = await send(owner, args)
         amount, approved = result['saved'], result.get('autoApproved', 0)
