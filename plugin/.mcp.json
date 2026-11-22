@@ -1,0 +1,5 @@
+{
+  "mcpServers": {
+    "braintwin": {"type": "http", "url": "https://braintwin.dev/mcp/"}
+  }
+}

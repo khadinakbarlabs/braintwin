@@ -127,7 +127,8 @@ def _build_parser() -> argparse.ArgumentParser:
         setup = sub.add_parser(name, help=f'{name} a personal automatic memory connection')
         setup.add_argument('client', choices=CLIENTS)
         if name == 'connect':
-            setup.add_argument('--storage', choices=('local', 'apify'), default='local')
+            setup.add_argument('--storage', choices=('local', 'apify'), default='apify',
+                               help='apify (default): one memory in your Apify account, shown at braintwin.dev; local: this computer only')
     sub.add_parser('connector-logout', help='remove the connector authorization from the system keyring')
     serve = sub.add_parser('serve', help='start the installed MCP connection')
     serve.add_argument('--storage', choices=('local', 'apify'), required=True)

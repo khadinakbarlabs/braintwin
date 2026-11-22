@@ -1,0 +1,14 @@
+{
+  "name": "braintwin",
+  "owner": {"name": "Braintwin", "url": "https://braintwin.dev"},
+  "metadata": {"description": "Braintwin: one memory shared by all your AI tools, kept in your own Apify account."},
+  "plugins": [
+    {
+      "name": "braintwin",
+      "source": "./plugin",
+      "description": "Remembers your lasting preferences, decisions and facts across chats and AI tools. Memories stay in your own Apify account.",
+      "homepage": "https://braintwin.dev",
+      "category": "productivity"
+    }
+  ]
+}

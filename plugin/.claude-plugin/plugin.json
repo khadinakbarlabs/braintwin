@@ -1,0 +1,10 @@
+{
+  "name": "braintwin",
+  "version": "0.1.0",
+  "description": "Remembers your lasting preferences, decisions and facts across chats and AI tools. Memories stay in your own Apify account; sign in with Apify once.",
+  "author": {"name": "Braintwin", "url": "https://braintwin.dev"},
+  "homepage": "https://braintwin.dev",
+  "repository": "https://github.com/khadinakbarlabs/braintwin",
+  "license": "MIT",
+  "keywords": ["memory", "preferences", "apify", "mcp"]
+}

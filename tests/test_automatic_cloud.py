@@ -42,6 +42,45 @@ class CloudInstallTests(unittest.TestCase):
             self.assertEqual(current_target('gemini-cli', cli), ('apify', 'Owner123'))
             self.assertEqual(json.loads(settings.read_text())['mcpServers']['other'], {'command':'different'})
 
+    def test_braintwin_dev_address_from_the_website_guide_is_replaced_without_manual_removal(self):
+        for url in ('https://braintwin.dev/mcp/', 'https://braintwin.dev/mcp'):
+            with self.subTest(url=url), tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {'HOME': folder, 'BRAINTWIN_HOME': folder + '/store'}):
+                config = Path(folder) / '.claude.json'
+                config.write_text(json.dumps({'mcpServers': {'braintwin': {'type': 'http', 'url': url}, 'other': {'command': 'x'}}}))
+                cli = Path(folder) / 'bin/braintwin-cli'
+                configure('claude-code', cli, 'apify', authorize=lambda _: 'Owner123')
+                self.assertEqual(current_target('claude-code', cli), ('apify', 'Owner123'))
+                saved = json.loads(config.read_text())['mcpServers']
+                self.assertNotIn('url', saved['braintwin'])
+                self.assertEqual(saved['other'], {'command': 'x'})
+                hooks = json.loads((Path(folder) / '.claude/settings.json').read_text())['hooks']
+                self.assertIn('UserPromptSubmit', hooks)
+
+    def test_settings_rewritten_by_a_running_agent_during_sign_in_are_merged_not_failed(self):
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {'HOME': folder, 'BRAINTWIN_HOME': folder + '/store'}):
+            config = Path(folder) / '.claude.json'
+            config.write_text(json.dumps({'mcpServers': {}, 'numStartups': 1}))
+            cli = Path(folder) / 'bin/braintwin-cli'
+            calls = []
+            def sign_in(_):
+                calls.append(1)
+                if len(calls) == 1:  # the agent saves its own settings while the browser sign-in is open
+                    config.write_text(json.dumps({'mcpServers': {}, 'numStartups': 2}))
+                return 'Owner123'
+            configure('claude-code', cli, 'apify', authorize=sign_in)
+            saved = json.loads(config.read_text())
+            self.assertEqual(saved['numStartups'], 2)
+            self.assertEqual(current_target('claude-code', cli), ('apify', 'Owner123'))
+            self.assertEqual(len(calls), 2)
+
+    def test_a_different_user_server_named_braintwin_is_never_replaced(self):
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {'HOME': folder, 'BRAINTWIN_HOME': folder + '/store'}):
+            config = Path(folder) / '.claude.json'
+            config.write_text(json.dumps({'mcpServers': {'braintwin': {'type': 'http', 'url': 'https://example.com/mcp'}}}))
+            before = config.read_bytes()
+            self.assertRaises(ValueError, configure, 'claude-code', Path(folder) / 'bin/braintwin-cli', 'apify', authorize=lambda _: 'Owner123')
+            self.assertEqual(config.read_bytes(), before)
+
     def test_device_login_waits_for_consent_and_checks_owner_before_using_tokens(self):
         from my_actor import connector_auth as auth
         calls = []

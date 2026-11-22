@@ -114,6 +114,19 @@ CORE_INSTRUCTIONS = (
 )
 
 
+# Hints apps use to decide whether a tool may run without asking. Reads change nothing; saves only add
+# notes (repeats are ignored); forget is the one tool that removes something from what AI tools see.
+TOOL_ANNOTATIONS = {
+    'memory_search': {'title': 'Search memory', 'readOnlyHint': True, 'openWorldHint': False},
+    'memory_context': {'title': 'Recall and remember', 'readOnlyHint': False, 'destructiveHint': False,
+                       'idempotentHint': True, 'openWorldHint': False},
+    'memory_capture': {'title': 'Save to memory', 'readOnlyHint': False, 'destructiveHint': False,
+                       'idempotentHint': True, 'openWorldHint': False},
+    'memory_forget': {'title': 'Forget a memory', 'readOnlyHint': False, 'destructiveHint': True,
+                      'idempotentHint': True, 'openWorldHint': False},
+}
+
+
 def resolve_toolset(default: str = TOOLSET_CORE) -> str:
     """`core` (4 tools, the default for real servers) or `full` (all 11, opt-in)."""
     value = (env_value(ENV_TOOLSET) or '').strip().lower()
@@ -158,7 +171,8 @@ def register_tools(
         def decorate(fn):
             if toolset == TOOLSET_CORE and fn.__name__ not in CORE_TOOLS:
                 return fn
-            return server.tool()(fn)
+            hints = TOOL_ANNOTATIONS.get(fn.__name__)
+            return server.tool(annotations=dict(hints))(fn) if hints else server.tool()(fn)
 
         return decorate
 

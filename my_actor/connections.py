@@ -15,10 +15,17 @@ from .hooks import EVENT_NAMES
 from .storage import default_sqlite_path
 
 MANAGED_URL = 'https://mcp.apify.com/?tools=khadinakbar/braintwin'
+# Remote Braintwin addresses an earlier guide may have added; connecting replaces them with the native entry.
+REMOTE_URLS = frozenset({MANAGED_URL, 'https://braintwin.dev/mcp/', 'https://braintwin.dev/mcp'})
+CHANGE_RETRIES = 5
 
 
 class SetupError(ValueError):
     """An actionable setup problem that is safe to display."""
+
+
+class ConcurrentChange(SetupError):
+    """Another program (often the agent itself) rewrote a settings file while setup ran."""
 
 
 def binary() -> Path:
@@ -116,7 +123,7 @@ def _commit(docs):
         for d in changed:
             current = d.path.read_bytes() if d.path.exists() else None
             if current != d.original:
-                raise SetupError(f'{d.path} changed during setup. Run the command again.')
+                raise ConcurrentChange(f'{d.path} changed during setup. Run the command again.')
             blob = d.render()
             d.write(blob)
             applied.append((d, blob))
@@ -210,7 +217,20 @@ def _update_hooks(doc, client, cli, *, remove, mode):
 
 
 def configure(client, cli, mode='local', *, remove=False, authorize=None):
-    """Validate both files before signing in or writing either. Leave unrelated settings intact."""
+    """Validate both files before signing in or writing either. Leave unrelated settings intact.
+
+    Running agents rewrite their own settings often (Claude Code saves ~/.claude.json constantly),
+    so a commit that finds the file changed is re-read and retried; the sign-in is cached by then.
+    """
+    for attempt in range(CHANGE_RETRIES):
+        try:
+            return _configure(client, cli, mode, remove=remove, authorize=authorize)
+        except ConcurrentChange:
+            if attempt == CHANGE_RETRIES - 1:
+                raise
+
+
+def _configure(client, cli, mode='local', *, remove=False, authorize=None):
     server_file, hook_file = paths(client)
     with locked('setup'):
         server = Document(server_file)
@@ -225,7 +245,7 @@ def configure(client, cli, mode='local', *, remove=False, authorize=None):
                 del group['braintwin']
         else:
             remote_key = 'httpUrl' if client == 'gemini-cli' and isinstance(prior, dict) and 'httpUrl' in prior else 'url'
-            remote = (isinstance(prior, dict) and prior.get(remote_key) == MANAGED_URL
+            remote = (isinstance(prior, dict) and prior.get(remote_key) in REMOTE_URLS
                       and set(prior) <= {remote_key, 'type', 'enabled', 'disabled'})
             local = isinstance(prior, dict) and prior.get('command') == str(cli.with_name('braintwin')) and set(prior) <= {'command', 'args'} and not prior.get('args')
             if prior is not None and not (ours or (remote and mode == 'apify') or (local and mode == 'local')):
