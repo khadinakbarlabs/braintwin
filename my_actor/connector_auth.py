@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from .connections import SetupError, locked, put_file, state_dir
+from .signin_health import clear_signin_problem, mark_signin_problem, refresh_lock, refused
 
 CLIENT_ID = 'https://braintwin.dev/connector-client.json'
 DEVICE_GRANT = 'urn:ietf:params:oauth:grant-type:device_code'
@@ -90,26 +91,46 @@ def _client():
     return httpx.Client(timeout=12, follow_redirects=False)
 
 
+def _stored(vault, account):
+    raw = vault.get_password(SERVICE, account)
+    return json.loads(raw) if raw else None
+
+
+def _usable(creds):
+    return bool(creds) and creds.get('expires_at', 0) > time.time() + 90
+
+
 def token_for(account):
     account = _owner(account)
-    with locked('account'):
+    # The shared lock covers every Braintwin folder of this computer user, because they all use the
+    # same keyring entry. A second renewal of an already used key can make Apify cancel the sign-in.
+    with locked('account'), refresh_lock(account):
         vault = _vault()
-        raw = vault.get_password(SERVICE, account)
-        if not raw:
+        creds = _stored(vault, account)
+        if not creds:
+            mark_signin_problem(account, 'missing')
             raise SetupError('Sign in to Apify again with the connector setup command.')
-        creds = json.loads(raw)
-        if creds.get('expires_at', 0) > time.time() + 90:
+        if _usable(creds):
+            clear_signin_problem(account)
             return creds['access_token']
         if not creds.get('refresh_token'):
+            mark_signin_problem(account, 'expired')
             raise SetupError('The Apify connection expired. Run the connector setup again.')
         with _client() as http:
             res = http.post(ISSUER + '/token', data={'client_id': CLIENT_ID, 'grant_type':'refresh_token', 'refresh_token':creds['refresh_token']})
             if not res.is_success:
+                latest = _stored(vault, account)
+                if _usable(latest) and latest.get('refresh_token') != creds['refresh_token']:
+                    clear_signin_problem(account)  # an older copy without the shared lock renewed it
+                    return latest['access_token']
+                if refused(res):
+                    mark_signin_problem(account, 'expired')
                 raise SetupError('Apify sign-in expired. Reconnect this agent.')
             fresh = _credentials(res.json(), creds['refresh_token'])
             if _check_owner(http, fresh['access_token']) != account:
                 raise SetupError('The refreshed authorization belongs to a different account.')
         vault.set_password(SERVICE, account, json.dumps(fresh))
+        clear_signin_problem(account)
         return fresh['access_token']
 
 
@@ -133,6 +154,7 @@ def authorize(expected=None):
     with locked('account'):
         vault.set_password(SERVICE, owner, json.dumps(creds))
         put_file(current, owner.encode())
+    clear_signin_problem(owner)
     return owner
 
 
@@ -145,3 +167,4 @@ def logout():
             if vault.get_password(SERVICE, owner):
                 vault.delete_password(SERVICE, owner)
             current.unlink()
+            clear_signin_problem(owner)

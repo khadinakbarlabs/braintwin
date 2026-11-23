@@ -289,11 +289,15 @@ async def _cmd_hook(args: argparse.Namespace) -> dict[str, Any]:
                 return empty_output(args.event, args.client)
             storage, value = target
             if storage == 'apify':
+                from . import signin_health
                 if args.event == 'prompt':
                     from .cloud_connector import dispatch_prompt
                     from .hooks import _payload
                     dispatch_prompt(args.client, value, _payload(raw), binary())
-                return empty_output(args.event, args.client)
+                else:
+                    signin_health.dispatch_signin_check(value)
+                notice = signin_health.signin_notice(args.client, args.event, value, str(binary()))
+                return notice or empty_output(args.event, args.client)
             os.environ['BRAINTWIN_SQLITE'] = value
         with sqlite_transaction() as (kv, audit):
             brain = BrainStore(kv=kv, audit=audit)
@@ -347,7 +351,10 @@ def main(argv: list[str] | None = None) -> int:
                 result = {'client': args.client, 'configured': bool(target), 'storage': target[0] if target else None}
                 if target and target[0] == 'apify':
                     from .cloud_connector import last_result
+                    from .signin_health import signin_problem
                     result['lastSave'] = last_result(args.client, target[1])
+                    problem = signin_problem(target[1])
+                    result['signIn'] = problem['reason'] if problem else 'ok'
             else:
                 result = configure(args.client, binary(), getattr(args, 'storage', 'local'),
                                    remove=args.command == 'disconnect', authorize=authorize)
